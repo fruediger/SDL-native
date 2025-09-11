@@ -76,6 +76,13 @@ jobs:
           git reset --hard upstream/main
 
       # --------------------------------------------------------------
+      # 4b. Remove all upstream workflow files so they are never staged
+      # --------------------------------------------------------------
+      - name: Remove upstream workflows
+        run: |
+          rm -f .github/workflows/*
+
+      # --------------------------------------------------------------
       # 5. Check out workflow-customizations branch in a temp dir
       # --------------------------------------------------------------
       - name: Fetch workflow-customizations branch
