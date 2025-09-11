@@ -93,7 +93,7 @@ jobs:
           cp ../customs/.gitattributes .
 
       # --------------------------------------------------------------
-      # 7. Commit and push changes back to fork
+      # 7. Commit and push (force to overwrite remote main)
       # --------------------------------------------------------------
       - name: Commit and push
         env:
@@ -103,7 +103,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .github .gitattributes
           git commit -m "Mirror from upstream @ ${{ steps.getsha.outputs.sha }} + re-apply workflow files" || echo "No changes to commit"
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:main
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:main
 
   # ===================================================================
   # 1. Build (Linux)
