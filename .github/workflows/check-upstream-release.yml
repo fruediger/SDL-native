@@ -44,7 +44,8 @@ jobs:
             echo "Not an SDL3 release. Exiting."
             exit 0
           fi
-          semver="${{ steps.upstream.outputs.tag#release- }}"
+          semver="${{ steps.upstream.outputs.tag }}"
+          semver="${semver#release-}"
           echo "semver=$semver" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
