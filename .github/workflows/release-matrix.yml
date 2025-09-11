@@ -18,7 +18,7 @@
 #   * Install both runtime + dev for IBus/io_uring on ARM
 # =====================================================================
 
-name: Release (Linux + Windows multi-arch, manual, full-feature)
+name: Release (multi-arch)
 
 on:
   workflow_dispatch:
@@ -76,14 +76,14 @@ jobs:
           git reset --hard upstream/main
 
       # --------------------------------------------------------------
-      # 4b. Remove all upstream workflow files so they are never staged
+      # 5. Remove all upstream workflow files so they are never staged
       # --------------------------------------------------------------
       - name: Remove upstream workflows
         run: |
           rm -f .github/workflows/*
 
       # --------------------------------------------------------------
-      # 5. Check out workflow-customizations branch in a temp dir
+      # 6. Check out workflow-customizations branch in a temp dir
       # --------------------------------------------------------------
       - name: Fetch workflow-customizations branch
         run: |
@@ -92,7 +92,7 @@ jobs:
           git --work-tree=../customs checkout workflow-customizations -- .
 
       # --------------------------------------------------------------
-      # 6. Copy custom files into working tree
+      # 7. Copy custom files into working tree
       # --------------------------------------------------------------
       - name: Re-apply custom files
         run: |
@@ -100,7 +100,7 @@ jobs:
           cp ../customs/.gitattributes .
 
       # --------------------------------------------------------------
-      # 7. Commit and push (force to overwrite remote main)
+      # 8. Commit and push (force to overwrite remote main)
       # --------------------------------------------------------------
       - name: Commit and push
         env:
@@ -236,7 +236,8 @@ jobs:
 
       # --------------------------------------------------------------
       # 4. Hold critical packages to avoid removal during multi-arch installs
-      #    Workaround for runner-images bug #12091
+      #    Workaround for runner-images bug:
+      #    https://github.com/actions/runner-images/issues/12091
       # --------------------------------------------------------------
       - name: Hold critical packages to avoid removal
         run: |
@@ -527,7 +528,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
-          Compress-Archive -Path "runtimes" -DestinationPath "$env:ARTIFACTS_DIR\runtimes-all.zip" -Force
+          Compress-Archive -Path "runtimes" -DestinationPath "$env:ARTIFACTS_DIR\runtimes.zip" -Force
 
       # --------------------------------------------------------------
       # 4. Gather succeeded RIDs from success markers
@@ -552,11 +553,13 @@ jobs:
         shell: pwsh
         run: |
           if ([string]::IsNullOrEmpty("${{ github.event.inputs.version }}")) {
-            $ver = "v" + (Get-Date -Format "yyyyMMdd-HHmmss")
+            $semver = (Get-Date -Format "yyyyMMdd-HHmmss")
           } else {
-            $ver = "${{ github.event.inputs.version }}"
+            $semver = "${{ github.event.inputs.version }}"
           }
-          "tag=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          $tag = "v$semver"
+          "semver=$semver" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          "tag=$tag"       | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
 
       # --------------------------------------------------------------
       # 6. Create or update the GitHub release
@@ -569,11 +572,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.semver }}
           draft: false
           prerelease: false
           body: |
             Based on: https://github.com/libsdl-org/SDL/commit/${{ needs.mirror.outputs.upstream_sha }}
             Included runtimes: ${{ steps.gather.outputs.list }}
           files: |
-            ${{ env.ARTIFACTS_DIR }}\runtimes-all.zip
+            ${{ env.ARTIFACTS_DIR }}\runtimes.zip
