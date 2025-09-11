@@ -1,0 +1,71 @@
+# =====================================================================
+# SDL Upstream Release Polling Workflow
+# ---------------------------------------------------------------------
+# Purpose:
+# - Runs daily to check for new SDL3 releases in libsdl-org/SDL
+# - If a new release is found, triggers the release-matrix.yml workflow
+#   in this fork with the matching version number
+# Requirements:
+# - Secret: AUTO_RELEASE_WORKFLOW_TRIGGER_PAT (PAT with repo + workflow scopes)
+# =====================================================================
+
+name: Check Upstream Release
+
+on:
+  schedule:
+    # --------------------------------------------------------------
+    # Run daily at 06:00 UTC
+    # --------------------------------------------------------------
+    - cron: '0 6 * * *'
+  workflow_dispatch:  # Manual trigger for testing
+
+jobs:
+  check:
+    name: Check for new SDL3 release
+    runs-on: ubuntu-latest
+    steps:
+      # --------------------------------------------------------------
+      # 1. Fetch latest upstream release info
+      # --------------------------------------------------------------
+      - name: Fetch latest upstream release
+        id: upstream
+        run: |
+          latest=$(curl -s https://api.github.com/repos/libsdl-org/SDL/releases/latest)
+          tag=$(echo "$latest" | jq -r .tag_name)
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+
+      # --------------------------------------------------------------
+      # 2. Filter: only proceed if SDL3 release (tag starts with release-3)
+      # --------------------------------------------------------------
+      - name: Check if SDL3 release
+        id: filter
+        run: |
+          if [[ "${{ steps.upstream.outputs.tag }}" != release-3* ]]; then
+            echo "Not an SDL3 release. Exiting."
+            exit 0
+          fi
+          semver="${{ steps.upstream.outputs.tag#release- }}"
+          echo "semver=$semver" >> $GITHUB_OUTPUT
+
+      # --------------------------------------------------------------
+      # 3. Fetch latest release in this fork
+      # --------------------------------------------------------------
+      - name: Fetch latest fork release
+        id: fork
+        run: |
+          latest=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest)
+          tag=$(echo "$latest" | jq -r .tag_name)
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+
+      # --------------------------------------------------------------
+      # 4. Compare and trigger build workflow if new release found
+      # --------------------------------------------------------------
+      - name: Trigger build workflow
+        if: steps.fork.outputs.tag != steps.upstream.outputs.tag
+        run: |
+          echo "New upstream release found: ${{ steps.upstream.outputs.tag }} (semver: ${{ steps.filter.outputs.semver }})"
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: token ${{ secrets.AUTO_RELEASE_WORKFLOW_TRIGGER_PAT }}" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/release-matrix.yml/dispatches \
+            -d "{\"ref\":\"main\",\"inputs\":{\"version\":\"${{ steps.filter.outputs.semver }}\"}}"
