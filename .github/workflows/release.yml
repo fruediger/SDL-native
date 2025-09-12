@@ -548,7 +548,7 @@ jobs:
       # --------------------------------------------------------------
       # 5. Compute release tag/version
       # --------------------------------------------------------------
-      - name: Compute tag/version
+      - name: Compute release tag/version
         id: tag
         shell: pwsh
         run: |
@@ -571,10 +571,8 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.semver }}
-          draft: false
-          prerelease: false
+          tag_name: ${{ steps.tag.outputs.tag }}      # vX.Y.Z
+          name:     ${{ steps.tag.outputs.semver }}   # X.Y.Z
           body: |
             Based on: https://github.com/libsdl-org/SDL/commit/${{ needs.mirror.outputs.upstream_sha }}
             Included runtimes: ${{ steps.gather.outputs.list }}
