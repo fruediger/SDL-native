@@ -71,8 +71,14 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit. Skipping push."
+            exit 0
+          fi
+
           git commit -m "Mirror upstream at $TARGET_COMMIT and inject CI"
-          git push --force origin main
+          git push --force origin HEAD:main
 
           echo "fork_commit_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
