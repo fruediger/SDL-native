@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  check:
+  check_upstream:
     runs-on: ubuntu-latest
 
     steps:

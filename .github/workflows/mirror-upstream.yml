@@ -22,7 +22,7 @@ on:
     types: [mirror-upstream]
 
 jobs:
-  mirror:
+  mirror_upstream:
     runs-on: ubuntu-latest
 
     steps:
