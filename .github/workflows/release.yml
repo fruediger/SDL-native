@@ -1,655 +1,580 @@
-name: 'release'
-run-name: 'Create SDL release artifacts for ${{ inputs.commit }}'
+# =====================================================================
+# SDL Multi‑Platform Build Workflow (Linux + Windows)
+# ---------------------------------------------------------------------
+# Maintenance Notes:
+# - Target OS: Ubuntu 24.04 "Noble Numbat" (Linux builds) + Windows Server 2022 (Windows builds)
+# - Last verified: 2025‑09‑11
+# - Known quirks (Linux):
+#   * Multi‑arch libglib2.0-dev resolution bug on Noble runners
+#     (see: https://github.com/actions/runner-images/issues/12091)
+#   * liburing-dev is NOT available for i386 on Noble
+#   * CMake feature detection for IBus/io_uring in cross‑builds
+#     requires both -dev and runtime packages for the target arch
+#   * i386 build with -m32 requires gcc/g++ multilib to link
+# - Workarounds (Linux):
+#   * apt-mark hold critical packages before installing multi‑arch deps
+#   * Install Vulkan dev packages to help apt resolve GLib deps
+#   * Skip liburing for i386
+#   * Install both runtime + dev for IBus/io_uring on ARM
+# =====================================================================
+
+name: Release (multi-arch)
 
 on:
   workflow_dispatch:
     inputs:
-      commit:
-        description: 'Commit of SDL'
-        required: true
+      version:
+        description: "Release version tag (e.g., v1.2.3). If empty, a timestamped tag is used."
+        required: false
+
+permissions:
+  contents: write
 
 jobs:
-
-  src:
+  # ===================================================================
+  # 0. Mirror upstream and re-apply custom workflow files
+  # ===================================================================
+  mirror:
+    name: Mirror upstream and re-apply custom files
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
-      project: ${{ steps.releaser.outputs.project }}
-      version: ${{ steps.releaser.outputs.version }}
-      src-tar-gz: ${{ steps.releaser.outputs.src-tar-gz }}
-      src-tar-xz: ${{ steps.releaser.outputs.src-tar-xz }}
-      src-zip: ${{ steps.releaser.outputs.src-zip }}
+      upstream_sha: ${{ steps.getsha.outputs.sha }}
     steps:
-      - name: 'Set up Python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: 'Fetch build-release.py'
+      # --------------------------------------------------------------
+      # 1. Checkout your fork's default branch
+      # --------------------------------------------------------------
+      - name: Checkout fork
         uses: actions/checkout@v4
         with:
-          sparse-checkout: 'build-scripts/build-release.py'
-      - name: 'Set up SDL sources'
-        uses: actions/checkout@v4
-        with:
-          path: 'SDL'
-          fetch-depth: 0
-      - name: 'Build Source archive'
-        id: releaser
-        shell: bash
-        run: |
-          python build-scripts/build-release.py \
-            --actions source \
-            --commit ${{ inputs.commit }} \
-            --root "${{ github.workspace }}/SDL" \
-            --github \
-            --debug
-      - name: 'Store source archives'
-        uses: actions/upload-artifact@v4
-        with:
-          name: sources
-          path: '${{ github.workspace}}/dist'
-      - name: 'Generate summary'
-        run: |
-          echo "Run the following commands to download all artifacts:" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "mkdir -p /tmp/${{ steps.releaser.outputs.project }}-${{ steps.releaser.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "cd /tmp/${{ steps.releaser.outputs.project }}-${{ steps.releaser.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "gh run -R ${{ github.repository }} download ${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          ref: main
+          persist-credentials: false
 
-  linux-verify:
-    needs: [src]
+      # --------------------------------------------------------------
+      # 2. Add and fetch upstream
+      # --------------------------------------------------------------
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/libsdl-org/SDL.git
+          git fetch upstream main
+
+      # --------------------------------------------------------------
+      # 3. Record upstream commit SHA for release notes
+      # --------------------------------------------------------------
+      - name: Get upstream commit SHA
+        id: getsha
+        run: |
+          SHA=$(git rev-parse upstream/main)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+
+      # --------------------------------------------------------------
+      # 4. Hard reset to upstream/main
+      # --------------------------------------------------------------
+      - name: Reset to upstream/main
+        run: |
+          git reset --hard upstream/main
+
+      # --------------------------------------------------------------
+      # 5. Remove all upstream workflow files so they are never staged
+      # --------------------------------------------------------------
+      - name: Remove upstream workflows
+        run: |
+          rm -f .github/workflows/*
+
+      # --------------------------------------------------------------
+      # 6. Check out workflow-customizations branch in a temp dir
+      # --------------------------------------------------------------
+      - name: Fetch workflow-customizations branch
+        run: |
+          git fetch origin workflow-customizations:workflow-customizations
+          mkdir ../customs
+          git --work-tree=../customs checkout workflow-customizations -- .
+
+      # --------------------------------------------------------------
+      # 7. Copy custom files into working tree
+      # --------------------------------------------------------------
+      - name: Re-apply custom files
+        run: |
+          cp -r ../customs/.github .
+          cp ../customs/.gitattributes .
+
+      # --------------------------------------------------------------
+      # 8. Commit and push (force to overwrite remote main)
+      # --------------------------------------------------------------
+      - name: Commit and push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github .gitattributes
+          git commit -m "Mirror from upstream @ ${{ steps.getsha.outputs.sha }} + re-apply workflow files" || echo "No changes to commit"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:main
+
+  # ===================================================================
+  # 1. Build (Linux)
+  # ===================================================================
+  build_linux:
+    name: Build ${{ matrix.rid }} (Linux)
     runs-on: ubuntu-latest
+    needs: mirror
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ----------------------------------------------------------
+          # Native amd64 build — no cross-arch setup needed
+          # ----------------------------------------------------------
+          - rid: linux-x64
+            cc: gcc-14
+            cxx: g++-14
+            apt_arch: ""
+            arch_pkgs: ""
+            arch_setup: ""
+            cmake_args: ""
+
+          # ----------------------------------------------------------
+          # 32-bit x86 build — runs on amd64 host with -m32
+          # Needs multilib toolchain and 32-bit libs to link successfully.
+          # ----------------------------------------------------------
+          - rid: linux-x86
+            cc: gcc-14
+            cxx: g++-14
+            apt_arch: "i386"
+            arch_pkgs: "libc6-dev-i386 linux-libc-dev:i386 libstdc++-14-dev:i386 gcc-14-multilib g++-14-multilib"
+            arch_setup: |
+              sudo dpkg --add-architecture i386
+              sudo apt-get update
+            cmake_args: "-DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32"
+
+          # ----------------------------------------------------------
+          # ARM64 cross-build
+          # ----------------------------------------------------------
+          - rid: linux-arm64
+            cc: aarch64-linux-gnu-gcc-14
+            cxx: aarch64-linux-gnu-g++-14
+            apt_arch: "arm64"
+            arch_pkgs: "libc6-dev-arm64-cross linux-libc-dev-arm64-cross"
+            arch_setup: |
+              sudo dpkg --add-architecture arm64
+              if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+                sudo mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.disabled
+              fi
+              sudo tee /etc/apt/sources.list >/dev/null <<'EOF'
+              deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+              deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+              deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-backports main restricted universe multiverse
+              deb [arch=amd64] http://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+              EOF
+              sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<'EOF'
+              deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+              deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+              deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+              deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+              EOF
+              sudo apt-get update
+            cmake_args: "-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64"
+
+          # ----------------------------------------------------------
+          # ARM32 (armhf) cross-build
+          # ----------------------------------------------------------
+          - rid: linux-arm
+            cc: arm-linux-gnueabihf-gcc-14
+            cxx: arm-linux-gnueabihf-g++-14
+            apt_arch: "armhf"
+            arch_pkgs: "libc6-dev-armhf-cross linux-libc-dev-armhf-cross"
+            arch_setup: |
+              sudo dpkg --add-architecture armhf
+              if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+                sudo mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.disabled
+              fi
+              sudo tee /etc/apt/sources.list >/dev/null <<'EOF'
+              deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+              deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+              deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-backports main restricted universe multiverse
+              deb [arch=amd64] http://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+              EOF
+              sudo tee /etc/apt/sources.list.d/armhf.list >/dev/null <<'EOF'
+              deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+              deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+              deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+              deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+              EOF
+              sudo apt-get update
+            cmake_args: "-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=arm"
+
+    env:
+      BUILD_TYPE: Release
+      PACKAGE_DIR: ${{ github.workspace }}/package
+      SUCCESS_DIR: ${{ github.workspace }}/success
+
     steps:
-      - name: 'Download source archives'
-        uses: actions/download-artifact@v4
+      # --------------------------------------------------------------
+      # 1. Checkout source code
+      # --------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          name: sources
-          path: '${{ github.workspace }}'
-      - name: 'Unzip ${{ needs.src.outputs.src-zip }}'
-        id: zip
+          ref: main
+
+      # --------------------------------------------------------------
+      # 2. Install specific CMake version
+      # --------------------------------------------------------------
+      - name: Install CMake 3.30.0
+        uses: jwlawson/actions-setup-cmake@v1
+        with:
+          cmake-version: '3.30.0'
+
+      # --------------------------------------------------------------
+      # 3. Setup architecture (dpkg --add-architecture, apt sources)
+      # --------------------------------------------------------------
+      - name: Setup architecture
+        run: ${{ matrix.arch_setup }}
+        shell: bash
+
+      # --------------------------------------------------------------
+      # 4. Hold critical packages to avoid removal during multi-arch installs
+      #    Workaround for runner-images bug:
+      #    https://github.com/actions/runner-images/issues/12091
+      # --------------------------------------------------------------
+      - name: Hold critical packages to avoid removal
         run: |
-          mkdir /tmp/zipdir
-          cd /tmp/zipdir
-          unzip "${{ github.workspace }}/${{ needs.src.outputs.src-zip }}"
-          echo "path=/tmp/zipdir/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$GITHUB_OUTPUT
-      - name: 'Untar ${{ needs.src.outputs.src-tar-gz }}'
-        id: tar
-        run: |
-          mkdir -p /tmp/tardir
-          tar -C /tmp/tardir -v -x -f "${{ github.workspace }}/${{ needs.src.outputs.src-tar-gz }}"
-          echo "path=/tmp/tardir/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$GITHUB_OUTPUT
-      - name: 'Compare contents of ${{ needs.src.outputs.src-zip }} and  ${{ needs.src.outputs.src-tar-gz }}'
-        run: |
-          diff /tmp/zipdir /tmp/tardir
-      - name: 'Test versioning'
+          sudo apt-mark hold grub-common grub-efi-amd64-bin python3 python3-apt shim-signed
+
+      # --------------------------------------------------------------
+      # 5. Install build dependencies (native + target-arch)
+      # --------------------------------------------------------------
+      - name: Install build dependencies (native + target-arch)
         shell: bash
         run: |
-          ${{ steps.tar.outputs.path }}/build-scripts/test-versioning.sh
-      - name: 'Install Linux dependencies'
-        run: |
-          sudo apt-get update -y
+          set -euo pipefail
+          ARCH="${{ matrix.apt_arch }}"
+          SUF=""
+          if [ -n "$ARCH" ]; then SUF=":$ARCH"; fi
+
+          sudo apt-get update
+
+          # ------------------------------------------------------------
+          # Common host‑arch build dependencies
+          # ------------------------------------------------------------
           sudo apt-get install -y \
-            gnome-desktop-testing libasound2-dev libpulse-dev libaudio-dev libjack-dev libsndio-dev \
-            libusb-1.0-0-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
-            libxss-dev libwayland-dev libxkbcommon-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev \
-            libegl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev fcitx-libs-dev
-      - name: 'CMake (configure + build + tests + examples)'
-        run: |
-          cmake -S ${{ steps.tar.outputs.path }} -B /tmp/build -DSDL_TEST_LIBRARY=TRUE -DSDL_TESTS=TRUE -DSDL_EXAMPLES=TRUE
-          cmake --build /tmp/build --verbose
-          ctest --test-dir /tmp/build --no-tests=error --output-on-failure
+            build-essential git make pkg-config ninja-build gnome-desktop-testing \
+            libasound2-dev libpulse-dev libaudio-dev libjack-dev libsndio-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+            libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libdrm-dev libgbm-dev \
+            libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libdbus-1-dev \
+            libudev-dev libpipewire-0.3-dev libwayland-dev libdecor-0-dev \
+            libusb-1.0-0-dev libunwind-dev \
+            gcc-14 g++-14 \
+            gcc-14-aarch64-linux-gnu g++-14-aarch64-linux-gnu \
+            gcc-14-arm-linux-gnueabihf g++-14-arm-linux-gnueabihf \
+            libglib2.0-dev libvulkan-dev \
+            libibus-1.0-dev libibus-1.0-5 \
+            liburing-dev liburing2
 
-  dmg:
-    needs: [src]
-    runs-on: macos-latest
-    outputs:
-      dmg: ${{ steps.releaser.outputs.dmg }}
-    steps:
-      - name: 'Set up Python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: 'Fetch build-release.py'
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: 'build-scripts/build-release.py'
-      - name: 'Download source archives'
-        uses: actions/download-artifact@v4
-        with:
-          name: sources
-          path: '${{ github.workspace }}'
-      - name: 'Untar ${{ needs.src.outputs.src-tar-gz }}'
-        id: tar
-        run: |
-          mkdir -p "${{ github.workspace }}/tardir"
-          tar -C "${{ github.workspace }}/tardir" -v -x -f "${{ github.workspace }}/${{ needs.src.outputs.src-tar-gz }}"
-          echo "path=${{ github.workspace }}/tardir/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$GITHUB_OUTPUT
-      - name: 'Build SDL3.dmg'
-        id: releaser
-        shell: bash
-        run: |
-          python build-scripts/build-release.py \
-            --actions dmg \
-            --commit ${{ inputs.commit }} \
-            --root "${{ steps.tar.outputs.path }}" \
-            --github \
-            --debug
-      - name: 'Store DMG image file'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dmg
-          path: '${{ github.workspace }}/dist'
-
-  dmg-verify:
-    needs: [dmg, src]
-    runs-on: macos-latest
-    steps:
-      - name: 'Download source archives'
-        uses: actions/download-artifact@v4
-        with:
-          name: sources
-          path: '${{ github.workspace }}'
-      - name: 'Download ${{ needs.dmg.outputs.dmg }}'
-        uses: actions/download-artifact@v4
-        with:
-          name: dmg
-          path: '${{ github.workspace }}'
-      - name: 'Untar ${{ needs.src.outputs.src-tar-gz }}'
-        id: src
-        run: |
-          mkdir -p /tmp/tardir
-          tar -C /tmp/tardir -v -x -f "${{ github.workspace }}/${{ needs.src.outputs.src-tar-gz }}"
-          echo "path=/tmp/tardir/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$GITHUB_OUTPUT
-      - name: 'Mount ${{ needs.dmg.outputs.dmg }}'
-        id: mount
-        run: |
-          hdiutil attach '${{ github.workspace }}/${{ needs.dmg.outputs.dmg }}'
-          mount_point="/Volumes/${{ needs.src.outputs.project }}"
-          if [ ! -d "$mount_point/${{ needs.src.outputs.project }}.xcframework" ]; then
-            echo "Cannot find ${{ needs.src.outputs.project }}.xcframework!"
-            exit 1
+          # ------------------------------------------------------------
+          # Install any arch‑specific toolchain headers/libs from matrix
+          # ------------------------------------------------------------
+          if [ -n "${{ matrix.arch_pkgs }}" ]; then
+            sudo apt-get install -y ${{ matrix.arch_pkgs }}
           fi
-          echo "mount_point=$mount_point">>$GITHUB_OUTPUT
-      - name: 'CMake (configure + build) Darwin'
-        run: |
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"               \
-              -DTEST_FULL=FALSE                                             \
-              -DTEST_STATIC=FALSE                                           \
-              -DTEST_TEST=FALSE                                             \
-              -DCMAKE_PREFIX_PATH="${{ steps.mount.outputs.mount_point }}"  \
-              -DCMAKE_SYSTEM_NAME=Darwin                                    \
-              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"                      \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13                           \
-              -Werror=dev                                                   \
-              -B build_darwin
-          cmake --build build_darwin --config Release --verbose
 
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"                                                   \
-              -DTEST_FULL=FALSE                                                                                 \
-              -DTEST_STATIC=FALSE                                                                               \
-              -DTEST_TEST=FALSE                                                                                 \
-              -DCMAKE_PREFIX_PATH="${{ steps.mount.outputs.mount_point }}/SDL3.xcframework/macos-arm64_x86_64"  \
-              -DCMAKE_SYSTEM_NAME=Darwin                                                                        \
-              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"                                                          \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13                                                               \
-              -Werror=dev                                                                                       \
-              -B build_darwin_2
-          cmake --build build_darwin --config Release --verbose
-      - name: 'CMake (configure + build) iOS'
-        run: |
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"               \
-              -DTEST_FULL=FALSE                                             \
-              -DTEST_STATIC=FALSE                                           \
-              -DTEST_TEST=FALSE                                             \
-              -DCMAKE_PREFIX_PATH="${{ steps.mount.outputs.mount_point }}"  \
-              -DCMAKE_SYSTEM_NAME=iOS                                       \
-              -DCMAKE_OSX_ARCHITECTURES="arm64"                             \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0                             \
-              -Werror=dev                                                   \
-              -B build_ios
-          cmake --build build_ios --config Release --verbose
-      - name: 'CMake (configure + build) tvOS'
-        run: |
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"               \
-              -DTEST_FULL=FALSE                                             \
-              -DTEST_STATIC=FALSE                                           \
-              -DTEST_TEST=FALSE                                             \
-              -DCMAKE_PREFIX_PATH="${{ steps.mount.outputs.mount_point }}"  \
-              -DCMAKE_SYSTEM_NAME=tvOS                                      \
-              -DCMAKE_OSX_ARCHITECTURES="arm64"                             \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0                             \
-              -Werror=dev                                                   \
-              -B build_tvos
-          cmake --build build_tvos --config Release --verbose
-      - name: 'CMake (configure + build) iOS simulator'
-        run: |
-          sysroot=$(xcodebuild -version -sdk iphonesimulator Path)
-          echo "sysroot=$sysroot"
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"               \
-              -DTEST_FULL=FALSE                                             \
-              -DTEST_STATIC=FALSE                                           \
-              -DTEST_TEST=FALSE                                             \
-              -DCMAKE_PREFIX_PATH="${{ steps.mount.outputs.mount_point }}"  \
-              -DCMAKE_SYSTEM_NAME=iOS                                       \
-              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"                      \
-              -DCMAKE_OSX_SYSROOT="${sysroot}"                              \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0                            \
-              -Werror=dev                                                   \
-              -B build_ios_simulator
-          cmake --build build_ios_simulator --config Release --verbose
-      - name: 'CMake (configure + build) tvOS simulator'
-        run: |
-          sysroot=$(xcodebuild -version -sdk appletvsimulator Path)
-          echo "sysroot=$sysroot"
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"               \
-              -DTEST_FULL=FALSE                                             \
-              -DTEST_STATIC=FALSE                                           \
-              -DTEST_TEST=FALSE                                             \
-              -DCMAKE_PREFIX_PATH="${{ steps.mount.outputs.mount_point }}"  \
-              -DCMAKE_SYSTEM_NAME=tvOS                                      \
-              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"                      \
-              -DCMAKE_OSX_SYSROOT="${sysroot}"                              \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0                            \
-              -Werror=dev                                                   \
-              -B build_tvos_simulator
-          cmake --build build_tvos_simulator --config Release --verbose
+          # ------------------------------------------------------------
+          # Cross‑arch target dependencies
+          # ------------------------------------------------------------
+          if [ -n "$ARCH" ]; then
+            PKGS="\
+              libxml2$SUF \
+              libasound2-dev$SUF libpulse-dev$SUF libaudio-dev$SUF libjack-dev$SUF libsndio-dev$SUF \
+              libx11-dev$SUF libxext-dev$SUF libxrandr-dev$SUF libxcursor-dev$SUF libxfixes-dev$SUF \
+              libxi-dev$SUF libxss-dev$SUF libxtst-dev$SUF libxkbcommon-dev$SUF libdrm-dev$SUF \
+              libgbm-dev$SUF libgl1-mesa-dev$SUF libgles2-mesa-dev$SUF libegl1-mesa-dev$SUF \
+              libdbus-1-dev$SUF libudev-dev$SUF libpipewire-0.3-dev$SUF libwayland-dev$SUF \
+              libdecor-0-dev$SUF libusb-1.0-0-dev$SUF libunwind-dev$SUF \
+              libglib2.0-dev$SUF libvulkan-dev$SUF \
+              libibus-1.0-dev$SUF libibus-1.0-5$SUF"
 
-  msvc:
-    needs: [src]
-    runs-on: windows-2025
-    outputs:
-      VC-x86: ${{ steps.releaser.outputs.VC-x86 }}
-      VC-x64: ${{ steps.releaser.outputs.VC-x64 }}
-      VC-arm64: ${{ steps.releaser.outputs.VC-arm64 }}
-      VC-devel: ${{ steps.releaser.outputs.VC-devel }}
-    steps:
-      - name: 'Set up Python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: 'Fetch build-release.py'
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: 'build-scripts/build-release.py'
-      - name: 'Download source archives'
-        uses: actions/download-artifact@v4
-        with:
-          name: sources
-          path: '${{ github.workspace }}'
-      - name: 'Unzip ${{ needs.src.outputs.src-zip }}'
-        id: zip
+            if [ "$ARCH" != "i386" ]; then
+              PKGS="$PKGS liburing-dev$SUF liburing2$SUF"
+            fi
+
+            sudo apt-get install -y $PKGS
+            dpkg -l | egrep 'lib(ibus|glib|uring|vulkan)|gcc-14|g\+\+-14' || true
+          fi
+
+          # ------------------------------------------------------------
+          # Special handling for i386 build
+          # ------------------------------------------------------------
+          if [ "$ARCH" = "i386" ]; then
+            echo 'int main(void){return 0;}' | gcc-14 -m32 -x c - -o /tmp/t32
+            file /tmp/t32 || true
+          fi
+
+      # --------------------------------------------------------------
+      # 6. Configure CMake for the build
+      # --------------------------------------------------------------
+      - name: Configure CMake
         run: |
-          New-Item C:\temp -ItemType Directory -ErrorAction SilentlyContinue
-          cd C:\temp
-          unzip "${{ github.workspace }}/${{ needs.src.outputs.src-zip }}"
-          echo "path=C:\temp\${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$Env:GITHUB_OUTPUT
-      - name: 'Build MSVC binary archives'
-        id: releaser
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            ${{ matrix.cmake_args }} \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_INSTALL_DOCS=FALSE
+
+      # --------------------------------------------------------------
+      # 7. Build SDL
+      # --------------------------------------------------------------
+      - name: Build
+        run: cmake --build build --config $BUILD_TYPE
+
+      # --------------------------------------------------------------
+      # 8. Copy built library to package dir and mark success
+      # --------------------------------------------------------------
+      - name: Copy library and mark success
         run: |
-          python build-scripts/build-release.py `
-            --actions msvc `
-            --commit ${{ inputs.commit }} `
-            --root "${{ steps.zip.outputs.path }}" `
-            --github `
-            --debug
-      - name: 'Store MSVC archives'
+          mkdir -p "$PACKAGE_DIR/runtimes/${{ matrix.rid }}/native"
+          libfile=$(find build -type f -name "libSDL3.so.*" | sort -V | tail -n 1)
+          if [ -z "$libfile" ]; then
+            libfile=$(find build -type f -name "libSDL3.so" | head -n 1)
+          fi
+          if [ -z "$libfile" ]; then
+            echo "WARNING: libSDL3.so not found for RID ${{ matrix.rid }}. Skipping."
+            exit 0
+          fi
+          cp "$libfile" "$PACKAGE_DIR/runtimes/${{ matrix.rid }}/native/libSDL3.so"
+          mkdir -p "$SUCCESS_DIR"
+          echo "${{ matrix.rid }}" > "$SUCCESS_DIR/${{ matrix.rid }}.txt"
+
+      # --------------------------------------------------------------
+      # 9. Upload built binary as artifact
+      # --------------------------------------------------------------
+      - name: Upload artifact (binary)
+        if: success() || failure()
         uses: actions/upload-artifact@v4
         with:
-          name: win32
-          path: '${{ github.workspace }}/dist'
+          name: ${{ matrix.rid }}
+          path: package/runtimes/${{ matrix.rid }}
+          if-no-files-found: ignore
 
-  msvc-verify:
-    needs: [msvc, src]
+      # --------------------------------------------------------------
+      # 10. Upload success marker as artifact
+      # --------------------------------------------------------------
+      - name: Upload artifact (success marker)
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: success-${{ matrix.rid }}
+          path: success/${{ matrix.rid }}.txt
+          if-no-files-found: ignore
+
+  # ===================================================================
+  # 2. Build (Windows)
+  # ===================================================================
+  build_windows:
+    name: Build ${{ matrix.rid }} (Windows)
     runs-on: windows-latest
-    steps:
-      - name: 'Fetch .github/actions/setup-ninja/action.yml'
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: '.github/actions/setup-ninja/action.yml'
-      - name: 'Download source archives'
-        uses: actions/download-artifact@v4
-        with:
-          name: sources
-          path: '${{ github.workspace }}'
-      - name: 'Download MSVC binaries'
-        uses: actions/download-artifact@v4
-        with:
-          name: win32
-          path: '${{ github.workspace }}'
-      - name: 'Unzip ${{ needs.src.outputs.src-zip }}'
-        id: src
-        run: |
-          mkdir '${{ github.workspace }}/sources'
-          cd '${{ github.workspace }}/sources'
-          unzip "${{ github.workspace }}/${{ needs.src.outputs.src-zip }}"
-          echo "path=${{ github.workspace }}/sources/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$env:GITHUB_OUTPUT
-      - name: 'Unzip ${{ needs.msvc.outputs.VC-devel }}'
-        id: bin
-        run: |
-          mkdir '${{ github.workspace }}/vc'
-          cd '${{ github.workspace }}/vc'
-          unzip "${{ github.workspace }}/${{ needs.msvc.outputs.VC-devel }}"
-          echo "path=${{ github.workspace }}/vc/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$env:GITHUB_OUTPUT
-      - name: Set up ninja
-        uses: ./.github/actions/setup-ninja
-      - name: 'Configure vcvars x86'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64_x86
-      - name: 'CMake (configure + build + tests) x86'
-        run: |
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"     `
-              -B build_x86                                        `
-              -GNinja                                             `
-              -DCMAKE_BUILD_TYPE=Debug                            `
-              -Werror=dev                                         `
-              -DTEST_FULL=TRUE                                    `
-              -DTEST_STATIC=FALSE                                 `
-              -DTEST_SHARED=TRUE                                  `
-              -DTEST_TEST=TRUE                                    `
-              -DCMAKE_SUPPRESS_REGENERATION=TRUE                  `
-              -DCMAKE_PREFIX_PATH="${{ steps.bin.outputs.path }}"
-          Start-Sleep -Seconds 2
-          cmake --build build_x86 --config Release --verbose
-          ctest --test-dir build_x86 --no-tests=error -C Release --output-on-failure
-      - name: 'Configure vcvars x64'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      - name: 'CMake (configure + build + tests) x64'
-        run: |
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"     `
-              -B build_x64                                        `
-              -GNinja                                             `
-              -DCMAKE_BUILD_TYPE=Debug                            `
-              -Werror=dev                                         `
-              -DTEST_FULL=TRUE                                    `
-              -DTEST_STATIC=FALSE                                 `
-              -DTEST_SHARED=TRUE                                  `
-              -DTEST_TEST=TRUE                                    `
-              -DCMAKE_SUPPRESS_REGENERATION=TRUE                  `
-              -DCMAKE_PREFIX_PATH="${{ steps.bin.outputs.path }}"
-          Start-Sleep -Seconds 2
-          cmake --build build_x64 --config Release --verbose
-          ctest --test-dir build_x64 --no-tests=error -C Release --output-on-failure
-      - name: 'Configure vcvars arm64'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64_arm64
-      - name: 'CMake (configure + build) arm64'
-        run: |
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"     `
-              -B build_arm64                                      `
-              -GNinja                                             `
-              -DCMAKE_BUILD_TYPE=Debug                            `
-              -Werror=dev                                         `
-              -DTEST_FULL=TRUE                                    `
-              -DTEST_STATIC=FALSE                                 `
-              -DTEST_SHARED=TRUE                                  `
-              -DTEST_TEST=TRUE                                    `
-              -DCMAKE_SUPPRESS_REGENERATION=TRUE                  `
-              -DCMAKE_PREFIX_PATH="${{ steps.bin.outputs.path }}"
-          Start-Sleep -Seconds 2
-          cmake --build build_arm64 --config Release --verbose
-      - name: 'CMake (configure + build) arm64ec'
-        run: |
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"     `
-              -B build_arm64ec                                    `
-              -GNinja                                             `
-              -DCMAKE_BUILD_TYPE=Debug                            `
-              -Werror=dev                                         `
-              -DTEST_FULL=TRUE                                    `
-              -DTEST_STATIC=FALSE                                 `
-              -DTEST_SHARED=TRUE                                  `
-              -DTEST_TEST=TRUE                                    `
-              -DSDL_DISABLE_AVX=TRUE                              `
-              -DSDL_DISABLE_AVX2=TRUE                             `
-              -DSDL_DISABLE_AVX512F=TRUE                          `
-              -DCMAKE_SUPPRESS_REGENERATION=TRUE                  `
-              -DCMAKE_C_FLAGS="/arm64EC" `
-              -DCMAKE_CXX_FLAGS="/arm64EC" `
-              -DCMAKE_EXE_LINKER_FLAGS="/MACHINE:ARM64EC"         `
-              -DCMAKE_SHARED_LINKER_FLAGS="/MACHINE:ARM64EC"      `
-              -DCMAKE_STATIC_LINKER_FLAGS="/MACHINE:ARM64EC"      `
-              -DCMAKE_PREFIX_PATH="${{ steps.bin.outputs.path }}"
-          Start-Sleep -Seconds 2
-          cmake --build build_arm64ec --config Release --verbose
+    needs: mirror
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ----------------------------------------------------------
+          # Native x64 build
+          # ----------------------------------------------------------
+          - rid: win-x64
+            arch: x64
+            generator: "Visual Studio 17 2022"
 
-  mingw:
-    needs: [src]
-    runs-on: ubuntu-24.04  # FIXME: current ubuntu-latest ships an outdated mingw, replace with ubuntu-latest once 24.04 becomes the new default
-    outputs:
-      mingw-devel-tar-gz: ${{ steps.releaser.outputs.mingw-devel-tar-gz }}
-      mingw-devel-tar-xz: ${{ steps.releaser.outputs.mingw-devel-tar-xz }}
+          # ----------------------------------------------------------
+          # Native x86 build
+          # ----------------------------------------------------------
+          - rid: win-x86
+            arch: Win32
+            generator: "Visual Studio 17 2022"
+
+          # ----------------------------------------------------------
+          # ARM64 build
+          # ----------------------------------------------------------
+          - rid: win-arm64
+            arch: ARM64
+            generator: "Visual Studio 17 2022"
+
+    env:
+      BUILD_TYPE: Release
+      PACKAGE_DIR: ${{ github.workspace }}\package
+      SUCCESS_DIR: ${{ github.workspace }}\success
+
     steps:
-      - name: 'Set up Python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: 'Fetch build-release.py'
+      # --------------------------------------------------------------
+      # 1. Checkout source code
+      # --------------------------------------------------------------
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          sparse-checkout: 'build-scripts/build-release.py'
-      - name: 'Install Mingw toolchain'
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y gcc-mingw-w64 g++-mingw-w64 ninja-build
-      - name: 'Download source archives'
-        uses: actions/download-artifact@v4
+          ref: main
+
+      # --------------------------------------------------------------
+      # 2. Install specific CMake version (if needed)
+      # --------------------------------------------------------------
+      - name: Install CMake 3.30.0
+        uses: jwlawson/actions-setup-cmake@v1
         with:
-          name: sources
-          path: '${{ github.workspace }}'
-      - name: 'Untar ${{ needs.src.outputs.src-tar-gz }}'
-        id: tar
+          cmake-version: '3.30.0'
+
+      # --------------------------------------------------------------
+      # 3. Configure CMake for the build
+      # --------------------------------------------------------------
+      - name: Configure CMake
         run: |
-          mkdir -p /tmp/tardir
-          tar -C /tmp/tardir -v -x -f "${{ github.workspace }}/${{ needs.src.outputs.src-tar-gz }}"
-          echo "path=/tmp/tardir/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$GITHUB_OUTPUT
-      - name: 'Build MinGW binary archives'
-        id: releaser
+          cmake -S . -B build -G "${{ matrix.generator }}" -A ${{ matrix.arch }} `
+            -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF `
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_INSTALL_DOCS=FALSE
+        shell: pwsh
+
+      # --------------------------------------------------------------
+      # 4. Build SDL
+      # --------------------------------------------------------------
+      - name: Build
+        run: cmake --build build --config $env:BUILD_TYPE
+        shell: pwsh
+
+      # --------------------------------------------------------------
+      # 5. Copy built DLL to package dir and mark success
+      # --------------------------------------------------------------
+      - name: Copy library and mark success
         run: |
-          python build-scripts/build-release.py \
-            --actions mingw \
-            --commit ${{ inputs.commit }} \
-            --root "${{ steps.tar.outputs.path }}" \
-            --github \
-            --debug
-      - name: 'Store MinGW archives'
+          New-Item -ItemType Directory -Force -Path "$env:PACKAGE_DIR\runtimes\${{ matrix.rid }}\native" | Out-Null
+          $dllFile = Get-ChildItem -Path build -Recurse -Filter "SDL3.dll" | Select-Object -First 1
+          if (-not $dllFile) {
+            Write-Warning "SDL3.dll not found for RID ${{ matrix.rid }}. Skipping."
+            exit 0
+          }
+          Copy-Item $dllFile.FullName "$env:PACKAGE_DIR\runtimes\${{ matrix.rid }}\native\SDL3.dll"
+          New-Item -ItemType Directory -Force -Path "$env:SUCCESS_DIR" | Out-Null
+          "${{ matrix.rid }}" | Out-File -FilePath "$env:SUCCESS_DIR\${{ matrix.rid }}.txt" -Encoding ascii
+        shell: pwsh
+
+      # --------------------------------------------------------------
+      # 6. Upload built binary as artifact
+      # --------------------------------------------------------------
+      - name: Upload artifact (binary)
+        if: success() || failure()
         uses: actions/upload-artifact@v4
         with:
-          name: mingw
-          path: '${{ github.workspace }}/dist'
+          name: ${{ matrix.rid }}
+          path: package/runtimes/${{ matrix.rid }}
+          if-no-files-found: ignore
 
-  mingw-verify:
-    needs: [mingw, src]
-    runs-on: ubuntu-latest
-    steps:
-      - name: 'Install Mingw toolchain'
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y gcc-mingw-w64 g++-mingw-w64 ninja-build
-      - name: 'Download source archives'
-        uses: actions/download-artifact@v4
-        with:
-          name: sources
-          path: '${{ github.workspace }}'
-      - name: 'Download MinGW binaries'
-        uses: actions/download-artifact@v4
-        with:
-          name: mingw
-          path: '${{ github.workspace }}'
-      - name: 'Untar ${{ needs.src.outputs.src-tar-gz }}'
-        id: src
-        run: |
-          mkdir -p /tmp/tardir
-          tar -C /tmp/tardir -v -x -f "${{ github.workspace }}/${{ needs.src.outputs.src-tar-gz }}"
-          echo "path=/tmp/tardir/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$GITHUB_OUTPUT
-      - name: 'Untar ${{ needs.mingw.outputs.mingw-devel-tar-gz }}'
-        id: bin
-        run: |
-          mkdir -p /tmp/mingw-tardir
-          tar -C /tmp/mingw-tardir -v -x -f "${{ github.workspace }}/${{ needs.mingw.outputs.mingw-devel-tar-gz }}"
-          echo "path=/tmp/mingw-tardir/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$GITHUB_OUTPUT
-      - name: 'CMake (configure + build) i686'
-        run: |
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"                                                           \
-              -DCMAKE_BUILD_TYPE="Release"                                                                              \
-              -DTEST_FULL=TRUE                                                                                          \
-              -DTEST_STATIC=FALSE                                                                                       \
-              -DTEST_TEST=TRUE                                                                                          \
-              -DCMAKE_PREFIX_PATH="${{ steps.bin.outputs.path }}"                                                       \
-              -DCMAKE_TOOLCHAIN_FILE="${{ steps.src.outputs.path }}/build-scripts/cmake-toolchain-mingw64-i686.cmake"   \
-              -DCMAKE_C_FLAGS="-DSDL_DISABLE_SSE4_2"                                                                    \
-              -Werror=dev                                                                                               \
-              -B build_x86
-          cmake --build build_x86 --config Release --verbose
-      - name: 'CMake (configure + build) x86_64'
-        run: |
-          cmake -S "${{ steps.src.outputs.path }}/cmake/test"                                                           \
-              -DCMAKE_BUILD_TYPE="Release"                                                                              \
-              -DTEST_FULL=TRUE                                                                                          \
-              -DTEST_STATIC=false                                                                                       \
-              -DTEST_TEST=TRUE                                                                                          \
-              -DCMAKE_PREFIX_PATH="${{ steps.bin.outputs.path }}"                                                       \
-              -DCMAKE_TOOLCHAIN_FILE="${{ steps.src.outputs.path }}/build-scripts/cmake-toolchain-mingw64-x86_64.cmake" \
-              -DCMAKE_C_FLAGS="-DSDL_DISABLE_SSE4_2"                                                                    \
-              -Werror=dev                                                                                               \
-              -B build_x64
-          cmake --build build_x64 --config Release --verbose
-
-  android:
-    needs: [src]
-    runs-on: ubuntu-latest
-    outputs:
-      android-aar: ${{ steps.releaser.outputs.android-aar }}
-    steps:
-      - name: 'Set up Python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: 'Fetch build-release.py'
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: 'build-scripts/build-release.py'
-      - name: 'Setup Android NDK'
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          local-cache: true
-          ndk-version: r28c
-      - name: 'Setup Java JDK'
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '11'
-      - name: 'Install ninja'
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ninja-build
-      - name: 'Download source archives'
-        uses: actions/download-artifact@v4
-        with:
-          name: sources
-          path: '${{ github.workspace }}'
-      - name: 'Untar ${{ needs.src.outputs.src-tar-gz }}'
-        id: tar
-        run: |
-          mkdir -p /tmp/tardir
-          tar -C /tmp/tardir -v -x -f "${{ github.workspace }}/${{ needs.src.outputs.src-tar-gz }}"
-          echo "path=/tmp/tardir/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$GITHUB_OUTPUT
-      - name: 'Build Android prefab binary archive(s)'
-        id: releaser
-        run: |
-          python build-scripts/build-release.py \
-            --actions android \
-            --android-api 21 \
-            --android-ndk-home "${{ steps.setup-ndk.outputs.ndk-path }}" \
-            --commit ${{ inputs.commit }} \
-            --root "${{ steps.tar.outputs.path }}" \
-            --github \
-            --debug
-      - name: 'Store Android archive(s)'
+      # --------------------------------------------------------------
+      # 7. Upload success marker as artifact
+      # --------------------------------------------------------------
+      - name: Upload artifact (success marker)
+        if: success() || failure()
         uses: actions/upload-artifact@v4
         with:
-          name: android
-          path: '${{ github.workspace }}/dist'
+          name: success-${{ matrix.rid }}
+          path: success/${{ matrix.rid }}.txt
+          if-no-files-found: ignore
 
-  android-verify:
-    needs: [android, src]
-    runs-on: ubuntu-latest
+  # ===================================================================
+  # 3. Package & Release (Linux + Windows)
+  # ===================================================================
+  package_and_release:
+    name: Package all builds and create release
+    runs-on: windows-latest
+    needs: [mirror, build_linux, build_windows]
+    if: always()
+    env:
+      ARTIFACTS_DIR: ${{ github.workspace }}\artifacts
+
     steps:
-      - name: 'Set up Python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-      - name: 'Download source archives'
+      # --------------------------------------------------------------
+      # 1. Download all artifacts from both build jobs
+      # --------------------------------------------------------------
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: sources
-          path: '${{ github.workspace }}'
-      - name: 'Download Android .aar archive'
-        uses: actions/download-artifact@v4
-        with:
-          name: android
-          path: '${{ github.workspace }}'
-      - name: 'Untar ${{ needs.src.outputs.src-tar-gz }}'
-        id: src
-        run: |
-          mkdir -p /tmp/tardir
-          tar -C /tmp/tardir -v -x -f "${{ github.workspace }}/${{ needs.src.outputs.src-tar-gz }}"
-          echo "path=/tmp/tardir/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}" >>$GITHUB_OUTPUT
-      - name: 'Extract Android SDK from AAR'
-        id: sdk
-        run: |
-          cd /tmp
-          unzip "${{ github.workspace }}/${{ needs.android.outputs.android-aar }}"
-          python "${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}.aar" -o /tmp/SDL3-android
-          echo "prefix=/tmp/SDL3-android" >>$GITHUB_OUTPUT
-          echo "sdl3-aar=/tmp/${{ needs.src.outputs.project }}-${{ needs.src.outputs.version }}.aar" >>$GITHUB_OUTPUT
-      - name: 'CMake (configure + build) x86, x64, arm32, arm64'
-        run: |
-          android_abis="x86 x86_64 armeabi-v7a arm64-v8a"
-          for android_abi in ${android_abis}; do
-            echo "Configuring ${android_abi}..."
-            cmake -S "${{ steps.src.outputs.path }}/cmake/test" \
-              -DTEST_FULL=TRUE \
-              -DTEST_STATIC=FALSE \
-              -DTEST_TEST=TRUE \
-              -DCMAKE_PREFIX_PATH="${{ steps.sdk.outputs.prefix }}" \
-              -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake \
-              -DANDROID_ABI=${android_abi} \
-              -DCMAKE_BUILD_TYPE=Release \
-              -B "${android_abi}"
-            echo "Building ${android_abi}..."
-            cmake --build "${android_abi}" --config Release --verbose
-          done
-      - name: 'Create gradle project'
-        id: create-gradle-project
-        run: |
-          python ${{ steps.src.outputs.path }}/build-scripts/create-android-project.py \
-            org.libsdl.testspriteminimal \
-            ${{ steps.src.outputs.path }}/test/testspriteminimal.c \
-            ${{ steps.src.outputs.path }}/test/icon.h \
-            --variant aar \
-            --output "/tmp/projects"
-          echo "path=/tmp/projects/org.libsdl.testspriteminimal" >>$GITHUB_OUTPUT
-      - name: 'Copy SDL3 aar into Gradle project'
-        run: |
-          cp "${{ steps.sdk.outputs.sdl3-aar }}" "${{ steps.create-gradle-project.outputs.path }}/app/libs"
+          path: artifacts_download
 
-          echo ""
-          echo "Project contents:"
-          echo ""
-          find "${{ steps.create-gradle-project.outputs.path }}"
-      - name: 'Build app (Gradle & CMake)'
+      # --------------------------------------------------------------
+      # 2. Create combined runtimes folder
+      # --------------------------------------------------------------
+      # Each artifact folder is named after its RID and contains:
+      #   native/<library file>
+      # We create runtimes/<rid>/native/ and copy the native folder in.
+      # --------------------------------------------------------------
+      - name: Create combined runtimes folder
+        shell: pwsh
         run: |
-          cd "${{ steps.create-gradle-project.outputs.path }}"
-          ./gradlew -i assembleRelease -Pandroid.native.buildOutput=verbose -PBUILD_WITH_CMAKE=1
-      - name: 'Build app (Gradle & ndk-build)'
+          New-Item -ItemType Directory -Force -Path "runtimes" | Out-Null
+          Get-ChildItem -Path "artifacts_download" -Directory | ForEach-Object {
+            $rid = $_.Name
+            if (Test-Path "$($_.FullName)\native") {
+              New-Item -ItemType Directory -Force -Path "runtimes\$rid" | Out-Null
+              Copy-Item -Recurse -Force "$($_.FullName)\native" "runtimes\$rid\"
+            }
+          }
+
+      # --------------------------------------------------------------
+      # 3. Zip the combined runtimes folder
+      # --------------------------------------------------------------
+      - name: Create combined zip
+        shell: pwsh
         run: |
-          cd "${{ steps.create-gradle-project.outputs.path }}"
-          ./gradlew -i assembleRelease -Pandroid.native.buildOutput=verbose
+          New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
+          Compress-Archive -Path "runtimes" -DestinationPath "$env:ARTIFACTS_DIR\runtimes.zip" -Force
+
+      # --------------------------------------------------------------
+      # 4. Gather succeeded RIDs from success markers
+      # --------------------------------------------------------------
+      - name: Gather succeeded RIDs
+        id: gather
+        shell: pwsh
+        run: |
+          $successFiles = Get-ChildItem -Path "artifacts_download" -Recurse -Filter "*.txt"
+          if ($successFiles.Count -eq 0) {
+            $list = "None"
+          } else {
+            $list = ($successFiles | Get-Content) -join ", "
+          }
+          "list=$list" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+
+      # --------------------------------------------------------------
+      # 5. Compute release tag/version
+      # --------------------------------------------------------------
+      - name: Compute release tag/version
+        id: tag
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrEmpty("${{ github.event.inputs.version }}")) {
+            $semver = (Get-Date -Format "yyyyMMdd-HHmmss")
+          } else {
+            $semver = "${{ github.event.inputs.version }}"
+          }
+          $tag = "v$semver"
+          "semver=$semver" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          "tag=$tag"       | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+
+      # --------------------------------------------------------------
+      # 6. Create or update the GitHub release
+      # --------------------------------------------------------------
+      # Release body format:
+      # Based on: <stub for now>
+      # Included runtimes: <comma-and-space-separated list>
+      # --------------------------------------------------------------
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}      # vX.Y.Z
+          name:     ${{ steps.tag.outputs.semver }}   # X.Y.Z
+          body: |
+            Based on: https://github.com/libsdl-org/SDL/commit/${{ needs.mirror.outputs.upstream_sha }}
+            Included runtimes: ${{ steps.gather.outputs.list }}
+          files: |
+            ${{ env.ARTIFACTS_DIR }}\runtimes.zip
