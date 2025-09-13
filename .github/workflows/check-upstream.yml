@@ -56,20 +56,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          latest_release=$(gh api repos/${{ github.repository }}/releases/latest)
+          latest_release=$(gh api repos/${{ github.repository }}/releases/latest 2>/dev/null || echo "")
+
+          # Do we even have at least one release?
+          if [ -z "$latest_release" ]; then
+            echo "No releases found in fork."
+            exit 0
+          fi
+
           fork_tag=$(echo "$latest_release" | jq -r .tag_name)
 
           # Strip 'v' prefix from our tag format
           fork_semver="${fork_tag#v}"
 
-          echo "Our latest release semver: $fork_semver"
+          echo "Our latest release: $fork_semver"
           echo "fork_semver=$fork_semver" >> $GITHUB_OUTPUT
 
       # ------------------------------------------------------------
       # Step 3: Compare semvers to detect new upstream release
       # ------------------------------------------------------------
       - name: Compare versions
-        if: steps.upstream.outputs.semver != steps.fork.outputs.fork_semver
+        # If fork_semver is undefined, fallback to '' so comparison is safe
+        if: steps.upstream.outputs.semver != (steps.fork.outputs.fork_semver || '')
         run: |
           echo "New upstream release detected: ${{ steps.upstream.outputs.semver }}"
           echo "Triggering mirror-upstream workflow..."
