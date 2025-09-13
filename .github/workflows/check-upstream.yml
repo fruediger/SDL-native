@@ -1,0 +1,92 @@
+name: Check upstream
+
+permissions:
+  contents: read    # Needed to read release metadata from the repo
+  actions: write    # Needed to trigger mirror-upstream workflow
+
+on:
+  # Run daily at 06:00 UTC to check for new upstream releases
+  schedule:
+    - cron: '0 6 * * *'
+  # Allow manual triggering for testing or forced checks
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # Step 1: Fetch latest release from upstream (libsdl-org/SDL)
+      # ------------------------------------------------------------
+      - name: Get latest upstream release
+        id: upstream        
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          upstream_repo="libsdl-org/SDL"
+
+          # Query GitHub API for latest release metadata
+          latest_release=$(gh api repos/$upstream_repo/releases/latest)
+
+          # Extract tag name and commit SHA from release
+          tag=$(echo "$latest_release" | jq -r .tag_name)
+          commit_sha=$(echo "$latest_release" | jq -r .target_commitish)
+
+          echo "Latest upstream tag: $tag"
+          echo "Upstream commit SHA: $commit_sha"
+
+          # Only consider SDL3 releases (tags starting with 'release-3')
+          if [[ ! "$tag" =~ ^release-3 ]]; then
+            echo "Not an SDL3 release. Exiting."
+            exit 0
+          fi
+
+          # Extract semver by stripping 'release-' prefix
+          semver="${tag#release-}"
+
+          echo "semver=$semver" >> $GITHUB_OUTPUT
+          echo "commit_sha=$commit_sha" >> $GITHUB_OUTPUT
+
+      # ------------------------------------------------------------
+      # Step 2: Fetch latest release from our fork
+      # ------------------------------------------------------------
+      - name: Get latest fork release
+        id: fork        
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          latest_release=$(gh api repos/${{ github.repository }}/releases/latest)
+          fork_tag=$(echo "$latest_release" | jq -r .tag_name)
+
+          # Strip 'v' prefix from our tag format
+          fork_semver="${fork_tag#v}"
+
+          echo "Our latest release semver: $fork_semver"
+          echo "fork_semver=$fork_semver" >> $GITHUB_OUTPUT
+
+      # ------------------------------------------------------------
+      # Step 3: Compare semvers to detect new upstream release
+      # ------------------------------------------------------------
+      - name: Compare versions
+        if: steps.upstream.outputs.semver != steps.fork.outputs.fork_semver
+        run: |
+          echo "New upstream release detected: ${{ steps.upstream.outputs.semver }}"
+          echo "Triggering mirror-upstream workflow..."
+
+      # ------------------------------------------------------------
+      # Step 4: Trigger mirror-upstream if new release found
+      # ------------------------------------------------------------
+      - name: Trigger mirror-upstream
+        if: steps.upstream.outputs.semver != steps.fork.outputs.fork_semver
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.WORKFLOW_TRIGGER_PAT }}
+          repository: ${{ github.repository }}
+          event-type: mirror-upstream
+          client-payload: |
+            {
+              "commit_sha": "${{ steps.upstream.outputs.commit_sha }}",
+              "semver": "${{ steps.upstream.outputs.semver }}",
+              "trigger_build": true
+            }
