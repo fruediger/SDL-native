@@ -466,14 +466,14 @@ jobs:
             $ridlist = ($successFiles | Get-Content) -join ", "
           }
 
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
-          "basedOn=$basedOn" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
-          "ridlist=$ridlist" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "basedOn=$basedOn"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "ridlist=$ridlist"
           
           if ($ridlist -eq "None") { exit 1 }
 
       # --------------------------------------------------------------
-      # 6. Create or update the GitHub release
+      # 5. Create or update the GitHub release
       # --------------------------------------------------------------
       - name: Create or update release
         uses: softprops/action-gh-release@v2

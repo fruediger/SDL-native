@@ -73,7 +73,7 @@ jobs:
           git add .
 
           if git diff --cached --quiet; then
-            echo "No changes to commit. Skipping push."
+            echo "fork_commit_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
             exit 0
           fi
 
