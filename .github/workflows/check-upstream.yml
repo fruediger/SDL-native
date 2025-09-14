@@ -30,21 +30,34 @@ jobs:
           # Query GitHub API for latest release metadata
           latest_release=$(gh api repos/$upstream_repo/releases/latest)
 
-          # Extract tag name and commit SHA from release
-          tag=$(echo "$latest_release" | jq -r .tag_name)
-          upstream_commit_sha=$(echo "$latest_release" | jq -r .target_commitish)
+          # Extract tag name
+          tag_name=$(echo "$latest_release" | jq -r '.tag_name')
+          
+          # Get object infos about from the tag reference
+          tag_ref=$(gh api repos/$upstream_repo/git/ref/tags/$tag_name)
+          object_sha=$(echo "$tag_ref" | jq -r '.object.sha')
+          object_type=$(echo "$tag_ref" | jq -r '.object.type')
 
-          echo "Latest upstream tag: $tag"
+          if [ $object_type == "commit" ]; then
+            # The object is of type commit -> it's SHA is the commit SHA
+            upstream_commit_sha=$object_sha
+          else
+            # The object seems to be of type tag -> get commit SHA otherwise
+            tag=$(gh api repos/$upstream_repo/git/tags/$object_sha)
+            upstream_commit_sha=$(echo "$tag" | jq -r '.object.sha')
+          fi
+
+          echo "Latest upstream tag: $tag_name"
           echo "Upstream commit SHA: $upstream_commit_sha"
 
           # Only consider SDL3 releases (tags starting with 'release-3')
-          if [[ ! "$tag" =~ ^release-3 ]]; then
+          if [[ ! "$tag_name" =~ ^release-3 ]]; then
             echo "Not an SDL3 release. Exiting."
             exit 0
           fi
 
           # Extract version by stripping 'release-' prefix
-          version="${tag#release-}"
+          version="${tag_name#release-}"
 
           echo "version=$version" >> $GITHUB_OUTPUT
           echo "upstream_commit_sha=$upstream_commit_sha" >> $GITHUB_OUTPUT
