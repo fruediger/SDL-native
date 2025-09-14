@@ -97,5 +97,5 @@ jobs:
             {
               "commit_sha": "${{ steps.commit.outputs.fork_commit_sha }}",
               "version": "${{ github.event.inputs.version || github.event.client_payload.version }}",
-              "upstream_commit_sha:" "${{ github.event.inputs.upstream_commit_sha || github.event.client_payload.upstream_commit_sha }}"
+              "upstream_commit_sha": "${{ github.event.inputs.upstream_commit_sha || github.event.client_payload.upstream_commit_sha }}"
             }
