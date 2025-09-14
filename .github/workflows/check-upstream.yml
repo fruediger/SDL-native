@@ -1,8 +1,8 @@
 name: Check upstream
 
 permissions:
-  contents: read    # Needed to read release metadata from the repo
-  actions: write    # Needed to trigger mirror-upstream workflow
+  contents: read
+  actions: write
 
 on:
   # Run daily at 06:00 UTC to check for new upstream releases
@@ -32,10 +32,10 @@ jobs:
 
           # Extract tag name and commit SHA from release
           tag=$(echo "$latest_release" | jq -r .tag_name)
-          commit_sha=$(echo "$latest_release" | jq -r .target_commitish)
+          upstream_commit_sha=$(echo "$latest_release" | jq -r .target_commitish)
 
           echo "Latest upstream tag: $tag"
-          echo "Upstream commit SHA: $commit_sha"
+          echo "Upstream commit SHA: $upstream_commit_sha"
 
           # Only consider SDL3 releases (tags starting with 'release-3')
           if [[ ! "$tag" =~ ^release-3 ]]; then
@@ -43,11 +43,11 @@ jobs:
             exit 0
           fi
 
-          # Extract semver by stripping 'release-' prefix
-          semver="${tag#release-}"
+          # Extract version by stripping 'release-' prefix
+          version="${tag#release-}"
 
-          echo "semver=$semver" >> $GITHUB_OUTPUT
-          echo "commit_sha=$commit_sha" >> $GITHUB_OUTPUT
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "upstream_commit_sha=$upstream_commit_sha" >> $GITHUB_OUTPUT
 
       # ------------------------------------------------------------
       # Step 2: Fetch latest release from our fork
@@ -68,26 +68,26 @@ jobs:
           fork_tag=$(echo "$latest_release" | jq -r .tag_name)
 
           # Strip 'v' prefix from our tag format
-          fork_semver="${fork_tag#v}"
+          fork_version="${fork_tag#v}"
 
-          echo "Our latest release: $fork_semver"
-          echo "fork_semver=$fork_semver" >> $GITHUB_OUTPUT
+          echo "Our latest release: $fork_version"
+          echo "fork_version=$fork_version" >> $GITHUB_OUTPUT
 
       # ------------------------------------------------------------
-      # Step 3: Compare semvers to detect new upstream release
+      # Step 3: Compare versions to detect new upstream release
       # ------------------------------------------------------------
       - name: Compare versions
-        # If fork_semver is undefined, fallback to '' so comparison is safe
-        if: steps.upstream.outputs.semver != (steps.fork.outputs.fork_semver || '')
+        # If fork_version is undefined, fallback to '' so comparison is safe
+        if: steps.upstream.outputs.version != (steps.fork.outputs.fork_version || '')
         run: |
-          echo "New upstream release detected: ${{ steps.upstream.outputs.semver }}"
+          echo "New upstream release detected: ${{ steps.upstream.outputs.version }}"
           echo "Triggering mirror-upstream workflow..."
 
       # ------------------------------------------------------------
       # Step 4: Trigger mirror-upstream if new release found
       # ------------------------------------------------------------
       - name: Trigger mirror-upstream
-        if: steps.upstream.outputs.semver != steps.fork.outputs.fork_semver
+        if: steps.upstream.outputs.version != steps.fork.outputs.fork_version
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.WORKFLOW_TRIGGER_PAT }}
@@ -95,7 +95,7 @@ jobs:
           event-type: mirror-upstream
           client-payload: |
             {
-              "commit_sha": "${{ steps.upstream.outputs.commit_sha }}",
-              "semver": "${{ steps.upstream.outputs.semver }}",
+              "upstream_commit_sha": "${{ steps.upstream.outputs.upstream_commit_sha }}",
+              "version": "${{ steps.upstream.outputs.version }}",
               "trigger_build": true
             }

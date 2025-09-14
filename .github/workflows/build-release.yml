@@ -10,8 +10,12 @@ on:
       commit_sha:
         description: "Commit SHA to build (optional). If empty, builds the current main."
         required: false
-      semver:
+      version:
         description: "Version number for release (optional). If empty, a timestamp will be used."
+        required: false
+
+      upstream_commit_sha:
+        description: "Upstream Commit SHA used as base for the build (optional). If empty, defaults to 'unknown'."
         required: false
 
   repository_dispatch:
@@ -443,19 +447,19 @@ jobs:
         id: gather
         shell: pwsh
         run: |
-          # Version (semver) comes from workflow inputs or repository_dispatch payload; fallback to timestamp
-          if ([string]::IsNullOrEmpty("${{ github.event.inputs.semver || github.event.client_payload.semver }}")) {
+          # Version comes from workflow inputs or repository_dispatch payload; fallback to timestamp
+          if ([string]::IsNullOrEmpty("${{ github.event.inputs.version || github.event.client_payload.version }}")) {
             $version = (Get-Date -Format "yyyyMMdd-HHmmss")
           } else {
-            $version = "${{ github.event.inputs.semver || github.event.client_payload.semver }}"
+            $version = "${{ github.event.inputs.version || github.event.client_payload.version }}"
           }
 
           # Based-on line: produce either the URL or 'unknown' (without a trailing commit segment)
-          $commitSha = "${{ github.event.inputs.commit_sha || github.event.client_payload.commit_sha }}"
-          if ([string]::IsNullOrEmpty($commitSha)) {
-            $basedOn = "unknown"
+          $upstreamCommitSha = "${{ github.event.inputs.upstream_commit_sha || github.event.client_payload.upstream_commit_sha }}"
+          if ([string]::IsNullOrEmpty($upstreamCommitSha)) {
+            $basedon = "unknown"
           } else {
-            $basedOn = "https://github.com/libsdl-org/SDL/commit/$commitSha"
+            $basedon = "https://github.com/libsdl-org/SDL/commit/$upstreamCommitSha"
           }
 
           # Gather success markers into a comma-separated list
@@ -467,7 +471,7 @@ jobs:
           }
 
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "basedOn=$basedOn"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "basedon=$basedon"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "ridlist=$ridlist"
           
           if ($ridlist -eq "None") { exit 1 }
@@ -481,7 +485,7 @@ jobs:
           tag_name: v${{ steps.gather.outputs.version }}
           name: ${{ steps.gather.outputs.version }}
           body: |
-            Based on: ${{ steps.gather.outputs.basedOn }}
+            Based on: ${{ steps.gather.outputs.basedon }}
             Included runtimes: ${{ steps.gather.outputs.ridlist }}
           files: |
             ${{ env.ARTIFACTS_DIR }}\runtimes.zip
