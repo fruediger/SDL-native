@@ -23,6 +23,7 @@ on:
 
 jobs:
   mirror_upstream:
+    name: Mirror upstream
     runs-on: ubuntu-latest
 
     steps:
