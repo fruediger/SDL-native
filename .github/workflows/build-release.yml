@@ -14,7 +14,7 @@ on:
         description: "Version number for release (optional). If empty, a timestamp will be used."
         required: false
       upstream_commit_sha:
-        description: "Upstream Commit SHA used as base for the build (optional). If empty, defaults to 'unknown'."
+        description: "Upstream commit SHA used as base for the build (optional). If empty, defaults to 'unknown'."
         required: false
 
   repository_dispatch:
