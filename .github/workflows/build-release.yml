@@ -456,15 +456,21 @@ jobs:
             exit 0
           }
 
-          # Download license file if URL exists
+          New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
+
+          Write-Host "License API response:"
+          $licenseJson | ConvertTo-Json -Depth 3
+
           if ($licenseJson.download_url) {
+            Write-Host "Downloading license from $($licenseJson.download_url)"
             Invoke-WebRequest -Uri $licenseJson.download_url -OutFile "$env:ARTIFACTS_DIR\LICENSE"
           } else {
             Write-Warning "No download_url in license response."
           }
 
-          # Handle SPDX id
           $spdx = $licenseJson.spdx_id
+          Write-Host "SPDX id from API: $spdx"
+
           if ($spdx -and $spdx -ne "NOASSERTION") {
             Set-Content -Path "$env:ARTIFACTS_DIR\LICENSE.spdx" -Value $spdx
             Add-Content -Path $env:GITHUB_OUTPUT -Value "spdx=$spdx"
