@@ -409,10 +409,20 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts_download
+          path: artifacts_download      
 
       # --------------------------------------------------------------
-      # 2. Create combined runtimes folder
+      # 2. Checkout source code at the commit being released for the license file
+      # --------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.commit_sha || github.event.client_payload.commit_sha || 'main' }}
+          fetch-depth: 0
+          path: source_checkout
+
+      # --------------------------------------------------------------
+      # 3. Create combined runtimes folder
       # --------------------------------------------------------------
       # Each artifact folder is named after its RID and contains:
       #   native/<library file>
@@ -431,22 +441,13 @@ jobs:
           }
 
       # --------------------------------------------------------------
-      # 3. Zip the combined runtimes folder
+      # 4. Zip the combined runtimes folder
       # --------------------------------------------------------------
       - name: Create combined zip
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
           Compress-Archive -Path "runtimes" -DestinationPath "$env:ARTIFACTS_DIR\runtimes.zip" -Force
-
-      # --------------------------------------------------------------
-      # 4. Checkout source code at the commit being released
-      # --------------------------------------------------------------
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.commit_sha || github.event.client_payload.commit_sha || 'main' }}
-          fetch-depth: 0
       
       # --------------------------------------------------------------
       # 5. Collect license file from the repo state
@@ -455,7 +456,7 @@ jobs:
         shell: pwsh
         run: |
           # Search case-insensitively for LICENSE* or COPYING* at repo root
-          $license = Get-ChildItem -Path "${{ github.workspace }}" -File |
+          $license = Get-ChildItem -Path "source_checkout" -File |
                      Where-Object { $_.Name -match '^(?i:license|copying)(\..*)?$' } |
                      Select-Object -First 1
           if ($license) {
@@ -465,11 +466,6 @@ jobs:
           } else {
             Write-Warning "No license file found."
           }
-      
-      - name: List downloaded artifacts
-        run: |
-          echo "Downloaded artifacts:"
-          ls -R artifacts_download
 
       # --------------------------------------------------------------
       # 6. Gather release information
