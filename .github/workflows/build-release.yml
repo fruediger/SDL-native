@@ -490,10 +490,11 @@ jobs:
 
           # Defensive: check SPDX id
           if ($licenseJson.license -and $licenseJson.license.spdx_id -and $licenseJson.license.spdx_id -ne "NOASSERTION") {
-            $spdx = $licenseJson.license.spdx_id
-            Write-Host "SPDX id: $spdx"
-            Set-Content -Path "$env:ARTIFACTS_DIR\LICENSE.spdx" -Value $spdx
-            Add-Content -Path $env:GITHUB_OUTPUT -Value "spdx=$spdx"
+            $spdx = $licenseJson.license.spdx_id            
+            $spdxClean = $spdx.Trim()
+            Write-Host "SPDX id: $spdxClean"
+            $spdxClean | Out-File -FilePath "$env:ARTIFACTS_DIR\LICENSE.spdx" -Encoding ascii -NoNewline
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "spdx=$spdxClean"
           } else {
             Write-Host "No valid SPDX id found."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "spdx="
