@@ -465,6 +465,11 @@ jobs:
           } else {
             Write-Warning "No license file found."
           }
+      
+      - name: List downloaded artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          ls -R artifacts_download
 
       # --------------------------------------------------------------
       # 6. Gather release information
