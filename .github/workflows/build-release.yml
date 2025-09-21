@@ -438,15 +438,24 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
           Compress-Archive -Path "runtimes" -DestinationPath "$env:ARTIFACTS_DIR\runtimes.zip" -Force
+
+      # --------------------------------------------------------------
+      # 4. Checkout source code at the commit being released
+      # --------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.commit_sha || github.event.client_payload.commit_sha || 'main' }}
+          fetch-depth: 0
       
       # --------------------------------------------------------------
-      # 4. Collect license file from the repo state
+      # 5. Collect license file from the repo state
       # --------------------------------------------------------------
       - name: Collect license file
         shell: pwsh
         run: |
           # Search case-insensitively for LICENSE* or COPYING* at repo root
-          $license = Get-ChildItem -Path "artifacts_download" -Recurse -File |
+          $license = Get-ChildItem -Path "${{ github.workspace }}" -File |
                      Where-Object { $_.Name -match '^(?i:license|copying)(\..*)?$' } |
                      Select-Object -First 1
           if ($license) {
@@ -458,7 +467,7 @@ jobs:
           }
 
       # --------------------------------------------------------------
-      # 5. Gather release information
+      # 6. Gather release information
       # --------------------------------------------------------------
       - name: Gather release information
         id: gather
@@ -494,7 +503,7 @@ jobs:
           if ($ridlist -eq "None") { exit 1 }
 
       # --------------------------------------------------------------
-      # 6. Create or update the GitHub release
+      # 7. Create or update the GitHub release
       # --------------------------------------------------------------
       - name: Create or update release
         uses: softprops/action-gh-release@v2
