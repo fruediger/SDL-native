@@ -438,9 +438,27 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
           Compress-Archive -Path "runtimes" -DestinationPath "$env:ARTIFACTS_DIR\runtimes.zip" -Force
+      
+      # --------------------------------------------------------------
+      # 4. Collect license file from the repo state
+      # --------------------------------------------------------------
+      - name: Collect license file
+        shell: pwsh
+        run: |
+          # Search case-insensitively for LICENSE* or COPYING* at repo root
+          $license = Get-ChildItem -Path "artifacts_download" -Recurse -File |
+                     Where-Object { $_.Name -match '^(?i:license|copying)(\..*)?$' } |
+                     Select-Object -First 1
+          if ($license) {
+            New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
+            Copy-Item $license.FullName "$env:ARTIFACTS_DIR\LICENSE"
+            Write-Host "Using license file: $($license.FullName)"
+          } else {
+            Write-Warning "No license file found."
+          }
 
       # --------------------------------------------------------------
-      # 4. Gather release information
+      # 5. Gather release information
       # --------------------------------------------------------------
       - name: Gather release information
         id: gather
@@ -476,7 +494,7 @@ jobs:
           if ($ridlist -eq "None") { exit 1 }
 
       # --------------------------------------------------------------
-      # 5. Create or update the GitHub release
+      # 6. Create or update the GitHub release
       # --------------------------------------------------------------
       - name: Create or update release
         uses: softprops/action-gh-release@v2
@@ -488,3 +506,4 @@ jobs:
             Included runtimes: ${{ steps.gather.outputs.ridlist }}
           files: |
             ${{ env.ARTIFACTS_DIR }}\runtimes.zip
+            ${{ env.ARTIFACTS_DIR }}\LICENSE
