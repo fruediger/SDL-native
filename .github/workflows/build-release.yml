@@ -453,19 +453,42 @@ jobs:
             $licenseJson = gh api repos/$repo/license | ConvertFrom-Json
           } catch {
             Write-Warning "No license information available for this repo."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "license_file="
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "spdx="
             exit 0
           }
 
           # Ensure artifacts dir exists
           New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
 
-          if ($licenseJson.download_url) {
-            Write-Host "Downloading license from $($licenseJson.download_url)"
-            Invoke-WebRequest -Uri $licenseJson.download_url -OutFile "$env:ARTIFACTS_DIR\LICENSE"
-          } else {
-            Write-Warning "No download_url in license response."
+          # Defensive: pick filename
+          $licenseFileName = $licenseJson.name
+          if (-not $licenseFileName -or [string]::IsNullOrWhiteSpace($licenseFileName)) {
+            $licenseFileName = "LICENSE"
+            Write-Warning "License JSON did not contain a valid 'name'. Falling back to $licenseFileName"
           }
 
+          # Defensive: check download_url
+          if ($licenseJson.download_url -and -not [string]::IsNullOrWhiteSpace($licenseJson.download_url)) {
+            Write-Host "Downloading license from $($licenseJson.download_url)"
+            try {
+              Invoke-WebRequest -Uri $licenseJson.download_url -OutFile "$env:ARTIFACTS_DIR\$licenseFileName"
+            } catch {
+              Write-Warning "Failed to download license file from $($licenseJson.download_url)"
+            }
+            if (Test-Path "$env:ARTIFACTS_DIR\$licenseFileName") {
+              Write-Host "License file written as $licenseFileName"
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "license_file=$licenseFileName"
+            } else {
+              Write-Warning "LICENSE file was not created!"
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "license_file="
+            }
+          } else {
+            Write-Warning "No download_url in license response."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "license_file="
+          }
+
+          # Defensive: check SPDX id
           if ($licenseJson.license -and $licenseJson.license.spdx_id -and $licenseJson.license.spdx_id -ne "NOASSERTION") {
             $spdx = $licenseJson.license.spdx_id
             Write-Host "SPDX id: $spdx"
@@ -526,5 +549,6 @@ jobs:
             ${{ steps.license.outputs.spdx && format('License: {0}', steps.license.outputs.spdx) || '' }}
           files: |
             ${{ env.ARTIFACTS_DIR }}/runtimes.zip
-            ${{ env.ARTIFACTS_DIR }}/LICENSE*
+            ${{ env.ARTIFACTS_DIR }}/${{ steps.license.outputs.license_file }}
+            ${{ env.ARTIFACTS_DIR }}/LICENSE.spdx
 
