@@ -456,25 +456,30 @@ jobs:
             exit 0
           }
 
+          # Ensure artifacts dir exists
           New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
-
-          Write-Host "License API response:"
-          $licenseJson | ConvertTo-Json -Depth 3
 
           if ($licenseJson.download_url) {
             Write-Host "Downloading license from $($licenseJson.download_url)"
             Invoke-WebRequest -Uri $licenseJson.download_url -OutFile "$env:ARTIFACTS_DIR\LICENSE"
+
+            if (Test-Path "$env:ARTIFACTS_DIR\LICENSE") {
+              Write-Host "LICENSE file written to $env:ARTIFACTS_DIR\LICENSE"
+            } else {
+              Write-Warning "LICENSE file was not created!"
+            }
+
           } else {
             Write-Warning "No download_url in license response."
           }
 
-          $spdx = $licenseJson.spdx_id
-          Write-Host "SPDX id from API: $spdx"
-
-          if ($spdx -and $spdx -ne "NOASSERTION") {
+          if ($licenseJson.license -and $licenseJson.license.spdx_id -and $licenseJson.license.spdx_id -ne "NOASSERTION") {
+            $spdx = $licenseJson.license.spdx_id
+            Write-Host "SPDX id: $spdx"
             Set-Content -Path "$env:ARTIFACTS_DIR\LICENSE.spdx" -Value $spdx
             Add-Content -Path $env:GITHUB_OUTPUT -Value "spdx=$spdx"
           } else {
+            Write-Host "No valid SPDX id found."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "spdx="
           }
 
