@@ -409,20 +409,10 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts_download      
+          path: artifacts_download
 
       # --------------------------------------------------------------
-      # 2. Checkout source code at the commit being released for the license file
-      # --------------------------------------------------------------
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.commit_sha || github.event.client_payload.commit_sha || 'main' }}
-          fetch-depth: 0
-          path: source_checkout
-
-      # --------------------------------------------------------------
-      # 3. Create combined runtimes folder
+      # 2. Create combined runtimes folder
       # --------------------------------------------------------------
       # Each artifact folder is named after its RID and contains:
       #   native/<library file>
@@ -441,7 +431,7 @@ jobs:
           }
 
       # --------------------------------------------------------------
-      # 4. Zip the combined runtimes folder
+      # 3. Zip the combined runtimes folder
       # --------------------------------------------------------------
       - name: Create combined zip
         shell: pwsh
@@ -450,25 +440,40 @@ jobs:
           Compress-Archive -Path "runtimes" -DestinationPath "$env:ARTIFACTS_DIR\runtimes.zip" -Force
       
       # --------------------------------------------------------------
-      # 5. Collect license file from the repo state
+      # 4. Fetch license file and SPDX id via GitHub API
       # --------------------------------------------------------------
-      - name: Collect license file
+      - name: Fetch license metadata via GitHub API
+        id: license
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          # Search case-insensitively for LICENSE* or COPYING* at repo root
-          $license = Get-ChildItem -Path "source_checkout" -File |
-                     Where-Object { $_.Name -match '^(?i:license|copying)(\..*)?$' } |
-                     Select-Object -First 1
-          if ($license) {
-            New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
-            Copy-Item $license.FullName "$env:ARTIFACTS_DIR\LICENSE"
-            Write-Host "Using license file: $($license.FullName)"
+          $repo = "${{ github.repository }}"
+          try {
+            $licenseJson = gh api repos/$repo/license | ConvertFrom-Json
+          } catch {
+            Write-Warning "No license information available for this repo."
+            exit 0
+          }
+
+          # Download license file if URL exists
+          if ($licenseJson.download_url) {
+            Invoke-WebRequest -Uri $licenseJson.download_url -OutFile "$env:ARTIFACTS_DIR\LICENSE"
           } else {
-            Write-Warning "No license file found."
+            Write-Warning "No download_url in license response."
+          }
+
+          # Handle SPDX id
+          $spdx = $licenseJson.spdx_id
+          if ($spdx -and $spdx -ne "NOASSERTION") {
+            Set-Content -Path "$env:ARTIFACTS_DIR\LICENSE.spdx" -Value $spdx
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "spdx=$spdx"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "spdx="
           }
 
       # --------------------------------------------------------------
-      # 6. Gather release information
+      # 5. Gather release information
       # --------------------------------------------------------------
       - name: Gather release information
         id: gather
@@ -504,7 +509,7 @@ jobs:
           if ($ridlist -eq "None") { exit 1 }
 
       # --------------------------------------------------------------
-      # 7. Create or update the GitHub release
+      # 6. Create or update the GitHub release
       # --------------------------------------------------------------
       - name: Create or update release
         uses: softprops/action-gh-release@v2
@@ -514,6 +519,8 @@ jobs:
           body: |
             Based on: ${{ steps.gather.outputs.basedon }}
             Included runtimes: ${{ steps.gather.outputs.ridlist }}
+            ${{ steps.license.outputs.spdx && format('License: {0}', steps.license.outputs.spdx) || '' }}
           files: |
             ${{ env.ARTIFACTS_DIR }}\runtimes.zip
-            ${{ env.ARTIFACTS_DIR }}\LICENSE
+            ${{ env.ARTIFACTS_DIR }}\LICENSE*
+
