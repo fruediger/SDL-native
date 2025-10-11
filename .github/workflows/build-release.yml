@@ -41,7 +41,7 @@ jobs:
             apt_arch: ""
             arch_pkgs: ""
             arch_setup: ""
-            cmake_args: ""
+            cmake_args: "-DCMAKE_C_FLAGS=-m64 -DCMAKE_CXX_FLAGS=-m64"
 
           # ----------------------------------------------------------
           # 32-bit x86 build — runs on amd64 host with -m32
@@ -111,7 +111,7 @@ jobs:
               deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
               EOF
               sudo apt-get update
-            cmake_args: "-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=arm"
+            cmake_args: "-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=arm -DCMAKE_C_FLAGS=-marm -DCMAKE_CXX_FLAGS=-marm"
 
     env:
       BUILD_TYPE: Release
