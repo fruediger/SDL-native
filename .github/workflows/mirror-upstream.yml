@@ -46,7 +46,9 @@ jobs:
 
           TARGET_COMMIT="${{ github.event.inputs.upstream_commit_sha || github.event.client_payload.upstream_commit_sha }}"
           echo "Target upstream commit: $TARGET_COMMIT"
-
+          
+          echo "TARGET_COMMIT=$TARGET_COMMIT" >> $GITHUB_ENV
+          
           git reset --hard "$TARGET_COMMIT"
 
       # ------------------------------------------------------------
@@ -99,3 +101,4 @@ jobs:
               "version": "${{ github.event.inputs.version || github.event.client_payload.version }}",
               "upstream_commit_sha": "${{ github.event.inputs.upstream_commit_sha || github.event.client_payload.upstream_commit_sha }}"
             }
+
