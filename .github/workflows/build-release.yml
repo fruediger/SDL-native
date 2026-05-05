@@ -438,7 +438,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "$env:ARTIFACTS_DIR" | Out-Null
           Compress-Archive -Path "runtimes" -DestinationPath "$env:ARTIFACTS_DIR\runtimes.zip" -Force
-      
+
       # --------------------------------------------------------------
       # 4. Fetch license file and SPDX id via GitHub API
       # --------------------------------------------------------------
@@ -490,7 +490,7 @@ jobs:
 
           # Defensive: check SPDX id
           if ($licenseJson.license -and $licenseJson.license.spdx_id -and $licenseJson.license.spdx_id -ne "NOASSERTION") {
-            $spdx = $licenseJson.license.spdx_id            
+            $spdx = $licenseJson.license.spdx_id
             $spdxClean = $spdx.Trim()
             Write-Host "SPDX id: $spdxClean"
             $spdxClean | Out-File -FilePath "$env:ARTIFACTS_DIR\LICENSE.spdx" -Encoding ascii -NoNewline
@@ -553,3 +553,16 @@ jobs:
             ${{ env.ARTIFACTS_DIR }}/${{ steps.license.outputs.license_file }}
             ${{ env.ARTIFACTS_DIR }}/LICENSE.spdx
 
+      # --------------------------------------------------------------
+      # 7. Trigger pack-nuget-test-package with the new release
+      # --------------------------------------------------------------
+      - name: Trigger pack-nuget-test-package
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.WORKFLOW_TRIGGER_PAT }}
+          repository: ${{ github.repository }}
+          event-type: pack-nuget-test-package
+          client-payload: |
+            {
+              "tag": "v${{ steps.gather.outputs.version }}"
+            }

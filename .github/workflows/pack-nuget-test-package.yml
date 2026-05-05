@@ -14,8 +14,8 @@ on:
         type: boolean
         default: false
 
-  release:
-    types: [published]
+  repository_dispatch:
+    types: [pack-nuget-test-package]
 
 jobs:
   pack_nuget_test_package:
@@ -47,14 +47,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $inputTag = "${{ github.event.inputs.tag }}"
-          $eventTag = "${{ github.event.release.tag_name }}"
-          $repo     = "${{ github.repository }}"
+          $inputTag    = "${{ github.event.inputs.tag }}"
+          $dispatchTag = "${{ github.event.client_payload.tag }}"
+          $repo        = "${{ github.repository }}"
 
-          if (-not [string]::IsNullOrWhiteSpace($eventTag)) {
-            $tag = $eventTag
-          } elseif (-not [string]::IsNullOrWhiteSpace($inputTag)) {
+          if (-not [string]::IsNullOrWhiteSpace($inputTag)) {
             $tag = $inputTag
+          } elseif (-not [string]::IsNullOrWhiteSpace($dispatchTag)) {
+            $tag = $dispatchTag
           } else {
             $latestRelease = gh api "repos/$repo/releases/latest" | ConvertFrom-Json
             $tag = $latestRelease.tag_name
@@ -247,13 +247,17 @@ jobs:
         run: |
           Add-Type -AssemblyName System.Xml.Linq
 
+          $xProject = [System.Xml.Linq.XName]::Get("Project")
+          $xPropertyGroup = [System.Xml.Linq.XName]::Get("PropertyGroup")
+          $xPackageId = [System.Xml.Linq.XName]::Get("PackageId")
+
           if (-not (Test-Path "$env:TEMPLATE_CSPROJ")) {
             Write-Error "Template project file not found: $env:TEMPLATE_CSPROJ"
             exit 1
           }
 
           $doc = [System.Xml.Linq.XDocument]::Load("$env:TEMPLATE_CSPROJ")
-          $project = $doc.Element("Project")
+          $project = $doc.Element($xProject)
 
           if (-not $project) {
             Write-Error "Template project file does not contain a root <Project> element."
@@ -261,8 +265,8 @@ jobs:
           }
 
           $packageId = $null
-          foreach ($pg in $project.Elements("PropertyGroup")) {
-            $prop = $pg.Element("PackageId")
+          foreach ($pg in $project.Elements($xPropertyGroup)) {
+            $prop = $pg.Element($xPackageId)
             if ($prop -and -not [string]::IsNullOrWhiteSpace($prop.Value)) {
               $packageId = $prop.Value.Trim()
               break
@@ -337,6 +341,17 @@ jobs:
         run: |
           Add-Type -AssemblyName System.Xml.Linq
 
+          $xProject = [System.Xml.Linq.XName]::Get("Project")
+          $xPropertyGroup = [System.Xml.Linq.XName]::Get("PropertyGroup")
+          $xItemGroup = [System.Xml.Linq.XName]::Get("ItemGroup")
+          $xVersion = [System.Xml.Linq.XName]::Get("Version")
+          $xPackageLicenseExpression = [System.Xml.Linq.XName]::Get("PackageLicenseExpression")
+          $xPackageLicenseFile = [System.Xml.Linq.XName]::Get("PackageLicenseFile")
+          $xNone = [System.Xml.Linq.XName]::Get("None")
+          $xInclude = [System.Xml.Linq.XName]::Get("Include")
+          $xPack = [System.Xml.Linq.XName]::Get("Pack")
+          $xPackagePath = [System.Xml.Linq.XName]::Get("PackagePath")
+
           if (-not (Test-Path "$env:TEMPLATE_CSPROJ")) {
             Write-Error "Template project file not found: $env:TEMPLATE_CSPROJ"
             exit 1
@@ -346,31 +361,31 @@ jobs:
           Copy-Item "$env:TEMPLATE_CSPROJ" $outputProjectPath -Force
 
           $doc = [System.Xml.Linq.XDocument]::Load($outputProjectPath)
-          $project = $doc.Element("Project")
+          $project = $doc.Element($xProject)
 
           if (-not $project) {
             Write-Error "Template project file does not contain a root <Project> element."
             exit 1
           }
 
-          $propertyGroups = @($project.Elements("PropertyGroup"))
+          $propertyGroups = @($project.Elements($xPropertyGroup))
           $primaryPropertyGroup = if ($propertyGroups.Count -gt 0) {
             $propertyGroups[0]
           } else {
-            $newGroup = [System.Xml.Linq.XElement]::new("PropertyGroup")
+            $newGroup = [System.Xml.Linq.XElement]::new($xPropertyGroup)
             $project.AddFirst($newGroup)
             $newGroup
           }
 
-          function Get-ProjectProperty([System.Xml.Linq.XElement] $projectElement, [string] $name) {
-            foreach ($pg in $projectElement.Elements("PropertyGroup")) {
+          function Get-ProjectProperty([System.Xml.Linq.XElement] $projectElement, [System.Xml.Linq.XName] $name) {
+            foreach ($pg in $projectElement.Elements($xPropertyGroup)) {
               $prop = $pg.Element($name)
               if ($prop) { return $prop }
             }
             return $null
           }
 
-          function Ensure-ProjectPropertyIfMissing([System.Xml.Linq.XElement] $projectElement, [System.Xml.Linq.XElement] $targetPropertyGroup, [string] $name, [string] $value) {
+          function Ensure-ProjectPropertyIfMissing([System.Xml.Linq.XElement] $projectElement, [System.Xml.Linq.XElement] $targetPropertyGroup, [System.Xml.Linq.XName] $name, [string] $value) {
             if ([string]::IsNullOrWhiteSpace($value)) { return }
             $existing = Get-ProjectProperty $projectElement $name
             if (-not $existing) {
@@ -382,18 +397,18 @@ jobs:
           $packageLicenseExpression = "${{ steps.license.outputs.package_license_expression }}"
           $packageLicenseFile = "${{ steps.license.outputs.package_license_file }}"
 
-          Ensure-ProjectPropertyIfMissing $project $primaryPropertyGroup "Version" $resolvedVersion
-          Ensure-ProjectPropertyIfMissing $project $primaryPropertyGroup "PackageLicenseExpression" $packageLicenseExpression
-          Ensure-ProjectPropertyIfMissing $project $primaryPropertyGroup "PackageLicenseFile" $packageLicenseFile
+          Ensure-ProjectPropertyIfMissing $project $primaryPropertyGroup $xVersion $resolvedVersion
+          Ensure-ProjectPropertyIfMissing $project $primaryPropertyGroup $xPackageLicenseExpression $packageLicenseExpression
+          Ensure-ProjectPropertyIfMissing $project $primaryPropertyGroup $xPackageLicenseFile $packageLicenseFile
 
           $runtimesInclude = "$env:STAGING_DIR\runtimes\**\*"
           $hasRuntimesItem = $false
 
-          foreach ($ig in $project.Elements("ItemGroup")) {
-            foreach ($none in $ig.Elements("None")) {
-              $includeAttr = $none.Attribute("Include")
-              $packAttr = $none.Attribute("Pack")
-              $packagePathAttr = $none.Attribute("PackagePath")
+          foreach ($ig in $project.Elements($xItemGroup)) {
+            foreach ($none in $ig.Elements($xNone)) {
+              $includeAttr = $none.Attribute($xInclude)
+              $packAttr = $none.Attribute($xPack)
+              $packagePathAttr = $none.Attribute($xPackagePath)
 
               if ($includeAttr -and
                   $packAttr -and $packAttr.Value -eq "true" -and
@@ -406,17 +421,17 @@ jobs:
             if ($hasRuntimesItem) { break }
           }
 
-          $itemGroup = $project.Elements("ItemGroup") | Select-Object -First 1
+          $itemGroup = $project.Elements($xItemGroup) | Select-Object -First 1
           if (-not $itemGroup) {
-            $itemGroup = [System.Xml.Linq.XElement]::new("ItemGroup")
+            $itemGroup = [System.Xml.Linq.XElement]::new($xItemGroup)
             $project.Add($itemGroup)
           }
 
           if (-not $hasRuntimesItem) {
-            $noneElement = [System.Xml.Linq.XElement]::new("None")
-            $noneElement.SetAttributeValue("Include", $runtimesInclude)
-            $noneElement.SetAttributeValue("Pack", "true")
-            $noneElement.SetAttributeValue("PackagePath", "runtimes\")
+            $noneElement = [System.Xml.Linq.XElement]::new($xNone)
+            $noneElement.SetAttributeValue($xInclude, $runtimesInclude)
+            $noneElement.SetAttributeValue($xPack, "true")
+            $noneElement.SetAttributeValue($xPackagePath, "runtimes\")
             $itemGroup.Add($noneElement)
           }
 
@@ -424,11 +439,11 @@ jobs:
             $licenseInclude = "$env:ARTIFACTS_DIR\$packageLicenseFile"
             $hasLicenseItem = $false
 
-            foreach ($ig in $project.Elements("ItemGroup")) {
-              foreach ($none in $ig.Elements("None")) {
-                $includeAttr = $none.Attribute("Include")
-                $packAttr = $none.Attribute("Pack")
-                $packagePathAttr = $none.Attribute("PackagePath")
+            foreach ($ig in $project.Elements($xItemGroup)) {
+              foreach ($none in $ig.Elements($xNone)) {
+                $includeAttr = $none.Attribute($xInclude)
+                $packAttr = $none.Attribute($xPack)
+                $packagePathAttr = $none.Attribute($xPackagePath)
 
                 if ($includeAttr -and
                     $packAttr -and $packAttr.Value -eq "true" -and
@@ -442,10 +457,10 @@ jobs:
             }
 
             if (-not $hasLicenseItem) {
-              $licenseNoneElement = [System.Xml.Linq.XElement]::new("None")
-              $licenseNoneElement.SetAttributeValue("Include", $licenseInclude)
-              $licenseNoneElement.SetAttributeValue("Pack", "true")
-              $licenseNoneElement.SetAttributeValue("PackagePath", "")
+              $licenseNoneElement = [System.Xml.Linq.XElement]::new($xNone)
+              $licenseNoneElement.SetAttributeValue($xInclude, $licenseInclude)
+              $licenseNoneElement.SetAttributeValue($xPack, "true")
+              $licenseNoneElement.SetAttributeValue($xPackagePath, "")
               $itemGroup.Add($licenseNoneElement)
             }
           }
@@ -531,7 +546,7 @@ jobs:
       # 15. Push package to nuget.org
       # --------------------------------------------------------------
       - name: Push package to nuget.org
-        if: steps.rids.outputs.count != '0' && (github.event_name == 'release' || github.event.inputs.publish == 'true')
+        if: steps.rids.outputs.count != '0' && (github.event_name == 'repository_dispatch' || github.event.inputs.publish == 'true')
         shell: pwsh
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
