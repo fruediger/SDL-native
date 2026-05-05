@@ -2,6 +2,7 @@ name: Pack NuGet test package
 
 permissions:
   contents: read
+  id-token: write
 
 on:
   workflow_dispatch:
@@ -143,7 +144,15 @@ jobs:
           }
 
           $licenseAsset = $assets |
-            Where-Object { $_.name -ne "runtimes.zip" -and $_.name -ne "LICENSE.spdx" } |
+            Where-Object {
+              $_.name -ne "runtimes.zip" -and
+              $_.name -ne "LICENSE.spdx" -and
+              [string]::Equals(
+                [System.IO.Path]::GetFileNameWithoutExtension($_.name),
+                "license",
+                [System.StringComparison]::OrdinalIgnoreCase
+              )
+            } |
             Select-Object -First 1
 
           if ($licenseAsset) {
@@ -153,7 +162,7 @@ jobs:
               "repos/$repo/releases/assets/$($licenseAsset.id)" > "$env:ARTIFACTS_DIR\$($licenseAsset.name)"
             Add-Content -Path $env:GITHUB_OUTPUT -Value "license_file=$($licenseAsset.name)"
           } else {
-            Write-Host "No separate license file asset found."
+            Write-Host "No license file asset found."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "license_file="
           }
 
@@ -225,6 +234,8 @@ jobs:
           if (Test-Path $spdxPath) {
             $spdx = (Get-Content $spdxPath -Raw).Trim()
           }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "license_asset_file=$licenseFile"
 
           if (-not [string]::IsNullOrWhiteSpace($spdx) -and $spdx -ne "NOASSERTION") {
             Add-Content -Path $env:GITHUB_OUTPUT -Value "package_license_expression=$spdx"
@@ -396,6 +407,7 @@ jobs:
           $resolvedVersion = "${{ steps.version.outputs.value }}"
           $packageLicenseExpression = "${{ steps.license.outputs.package_license_expression }}"
           $packageLicenseFile = "${{ steps.license.outputs.package_license_file }}"
+          $licenseAssetFile = "${{ steps.license.outputs.license_asset_file }}"
 
           Ensure-ProjectPropertyIfMissing $project $primaryPropertyGroup $xVersion $resolvedVersion
           Ensure-ProjectPropertyIfMissing $project $primaryPropertyGroup $xPackageLicenseExpression $packageLicenseExpression
@@ -435,8 +447,8 @@ jobs:
             $itemGroup.Add($noneElement)
           }
 
-          if (-not [string]::IsNullOrWhiteSpace($packageLicenseFile)) {
-            $licenseInclude = "$env:ARTIFACTS_DIR\$packageLicenseFile"
+          if (-not [string]::IsNullOrWhiteSpace($licenseAssetFile)) {
+            $licenseInclude = "$env:ARTIFACTS_DIR\$licenseAssetFile"
             $hasLicenseItem = $false
 
             foreach ($ig in $project.Elements($xItemGroup)) {
@@ -543,19 +555,22 @@ jobs:
           if-no-files-found: error
 
       # --------------------------------------------------------------
-      # 15. Push package to nuget.org
+      # 15. NuGet login (OIDC → temp API key)
+      # --------------------------------------------------------------
+      - name: NuGet login (OIDC → temp API key)
+        id: login
+        if: steps.rids.outputs.count != '0' && (github.event_name == 'repository_dispatch' || github.event.inputs.publish == 'true')
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER_NATIVE_TEST }}
+
+      # --------------------------------------------------------------
+      # 16. Push package to nuget.org
       # --------------------------------------------------------------
       - name: Push package to nuget.org
         if: steps.rids.outputs.count != '0' && (github.event_name == 'repository_dispatch' || github.event.inputs.publish == 'true')
         shell: pwsh
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)) {
-            Write-Error "Secret 'NUGET_API_KEY' is required to publish the package."
-            exit 1
-          }
-
           $nupkg = Get-ChildItem -Path "$env:OUTPUT_DIR" -Filter "*.nupkg" | Select-Object -First 1
           if (-not $nupkg) {
             Write-Error "No .nupkg file found to publish."
@@ -563,11 +578,11 @@ jobs:
           }
 
           dotnet nuget push $nupkg.FullName `
-            --api-key $env:NUGET_API_KEY `
+            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" `
             --source "https://api.nuget.org/v3/index.json"
 
       # --------------------------------------------------------------
-      # 16. Nothing to package
+      # 17. Nothing to package
       # --------------------------------------------------------------
       - name: Nothing to package
         if: steps.assets.outputs.has_runtimes_zip != 'true' || steps.rids.outputs.count == '0'
