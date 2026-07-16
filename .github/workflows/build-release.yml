@@ -335,6 +335,25 @@ jobs:
         with:
           cmake-version: '3.30.0'
 
+      - name: Diagnose VS / CMake environment
+        shell: pwsh
+        run: |
+          Write-Host "ImageOS=$env:ImageOS"
+          Write-Host "ImageVersion=$env:ImageVersion"
+          where.exe cmake
+          cmake --version
+      
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            Write-Host "vswhere found: $vswhere"
+            & $vswhere -all -products * -format json
+          } else {
+            Write-Host "vswhere NOT found"
+          }
+      
+          # Dump key env that influences detection
+          Get-ChildItem Env: | Where-Object { $_.Name -match 'VS|VSCMD|VisualStudio|PATH' } | Sort-Object Name
+
       # --------------------------------------------------------------
       # 3. Configure CMake for the build
       # --------------------------------------------------------------
