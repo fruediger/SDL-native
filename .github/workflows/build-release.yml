@@ -131,10 +131,10 @@ jobs:
       # --------------------------------------------------------------
       # 2. Install specific CMake version
       # --------------------------------------------------------------
-      - name: Install CMake 3.30.0
+      - name: Install CMake 4.2.7
         uses: jwlawson/actions-setup-cmake@v1
         with:
-          cmake-version: '3.30.0'
+          cmake-version: '4.2.7'
 
       # --------------------------------------------------------------
       # 3. Setup architecture (dpkg --add-architecture, apt sources)
@@ -296,21 +296,21 @@ jobs:
           # ----------------------------------------------------------
           - rid: win-x64
             arch: x64
-            generator: "Visual Studio 17 2022"
+            generator: "Visual Studio 18 2026"
 
           # ----------------------------------------------------------
           # Native x86 build
           # ----------------------------------------------------------
           - rid: win-x86
             arch: Win32
-            generator: "Visual Studio 17 2022"
+            generator: "Visual Studio 18 2026"
 
           # ----------------------------------------------------------
           # ARM64 build
           # ----------------------------------------------------------
           - rid: win-arm64
             arch: ARM64
-            generator: "Visual Studio 17 2022"
+            generator: "Visual Studio 18 2026"
 
     env:
       BUILD_TYPE: Release
@@ -330,10 +330,10 @@ jobs:
       # --------------------------------------------------------------
       # 2. Install specific CMake version (if needed)
       # --------------------------------------------------------------
-      - name: Install CMake 3.30.0
+      - name: Install CMake 4.2.7
         uses: jwlawson/actions-setup-cmake@v1
         with:
-          cmake-version: '3.30.0'
+          cmake-version: '4.2.7'
       
       # --------------------------------------------------------------
       # 3. Configure CMake for the build
